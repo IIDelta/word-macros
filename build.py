@@ -35,6 +35,17 @@ def inject_custom_ui(dotm_path, custom_ui_path):
                 rels_content = rels_content.replace('</Relationships>', f'  {rel_str}\n</Relationships>')
                 with open(rels_path, 'w', encoding='utf-8') as f:
                     f.write(rels_content)
+                    
+        # Update [Content_Types].xml
+        content_types_path = os.path.join(tmpdir, '[Content_Types].xml')
+        if os.path.exists(content_types_path):
+            with open(content_types_path, 'r', encoding='utf-8') as f:
+                ct_content = f.read()
+            if 'customUI14.xml' not in ct_content:
+                override_str = '<Override PartName="/customUI/customUI14.xml" ContentType="application/vnd.ms-office.customUI+xml" />'
+                ct_content = ct_content.replace('</Types>', f'  {override_str}\n</Types>')
+                with open(content_types_path, 'w', encoding='utf-8') as f:
+                    f.write(ct_content)
         
         with zipfile.ZipFile(dotm_path, 'w', zipfile.ZIP_DEFLATED) as zout:
             for root, _, files in os.walk(tmpdir):
