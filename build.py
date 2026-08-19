@@ -52,7 +52,7 @@ def build_dotm():
 
     print("Starting Microsoft Word...")
     try:
-        word = win32com.client.DispatchEx("Word.Application")
+        word = win32com.client.Dispatch("Word.Application")
     except Exception as e:
         print(f"Failed to dispatch Word.Application. Ensure you are running this on a Windows machine with Microsoft Word installed.\nError details: {e}")
         sys.exit(1)
