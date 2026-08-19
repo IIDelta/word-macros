@@ -61,15 +61,14 @@ def build_dotm():
     word.AutomationSecurity = 1 # msoAutomationSecurityLow (enables macros without prompts during automation)
     
     try:
-        if not os.path.exists(dotm_path) or os.path.getsize(dotm_path) == 0:
-            print(f"Creating new base template at {dotm_path}...")
-            if os.path.exists(dotm_path):
+        print(f"Creating new base template at {dotm_path}...")
+        if os.path.exists(dotm_path):
+            try:
                 os.remove(dotm_path)
-            doc = word.Documents.Add()
-            doc.SaveAs2(dotm_path, FileFormat=15) # 15 = wdFormatXMLTemplateMacroEnabled
-        else:
-            print(f"Opening {dotm_path}...")
-            doc = word.Documents.Open(dotm_path)
+            except OSError:
+                pass # If we can't remove it, let SaveAs2 try to overwrite or fail
+        doc = word.Documents.Add()
+        doc.SaveAs2(dotm_path, FileFormat=15) # 15 = wdFormatXMLTemplateMacroEnabled
             
         # Remove existing standard modules
         vb_comp = doc.VBProject.VBComponents
