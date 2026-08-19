@@ -1,0 +1,23 @@
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui">
+  <ribbon>
+    <tabs>
+      <tab id="tabMWTools" label="MW Tools" insertAfterMso="TabHome">
+        
+        <group id="grpReview" label="Comparison & Review">
+          <button id="btnRedline" 
+                  label="Generate Visual Redline" 
+                  size="large" 
+                  imageMso="ReviewTrackChanges" 
+                  onAction="OnAction_GenerateRedline" />
+                  
+          <button id="btnStats" 
+                  label="Count Tracked Words" 
+                  size="normal" 
+                  imageMso="WordCount" 
+                  onAction="OnAction_TrackedWordCount" />
+        </group>
+        
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>

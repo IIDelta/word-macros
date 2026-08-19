@@ -1,0 +1,6 @@
+# Ignore Word temporary files
+~$*.doc*
+~$*.dot*
+
+# Ignore Mac OS hidden files (if any team members use Mac)
+.DS_Store
