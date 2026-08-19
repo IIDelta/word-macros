@@ -13,49 +13,54 @@ except ImportError:
     sys.exit(1)
 
 def inject_custom_ui(dotm_path, custom_ui_path):
-    print("Injecting Custom Ribbon UI...")
+    print("Injecting Custom Ribbon UI using native Windows OpenXML Packaging...")
     if not os.path.exists(custom_ui_path):
         print(f"Warning: Custom UI XML not found at {custom_ui_path}")
         return
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with zipfile.ZipFile(dotm_path, 'r') as zin:
-            zin.extractall(tmpdir)
-        
-        custom_ui_dir = os.path.join(tmpdir, 'customUI')
-        os.makedirs(custom_ui_dir, exist_ok=True)
-        shutil.copy2(custom_ui_path, os.path.join(custom_ui_dir, 'customUI14.xml'))
-        
-        rels_path = os.path.join(tmpdir, '_rels', '.rels')
-        if os.path.exists(rels_path):
-            with open(rels_path, 'r', encoding='utf-8') as f:
-                rels_content = f.read()
-            if 'customUI14.xml' not in rels_content:
-                rel_str = '<Relationship Id="customUIRelID" Type="http://schemas.microsoft.com/office/2006/relationships/ui/extensibility" Target="customUI/customUI14.xml"/>'
-                rels_content = rels_content.replace('</Relationships>', f'  {rel_str}\n</Relationships>')
-                with open(rels_path, 'w', encoding='utf-8') as f:
-                    f.write(rels_content)
-                    
-        # Update [Content_Types].xml
-        content_types_path = os.path.join(tmpdir, '[Content_Types].xml')
-        if os.path.exists(content_types_path):
-            with open(content_types_path, 'r', encoding='utf-8') as f:
-                ct_content = f.read()
-            if 'customUI14.xml' not in ct_content:
-                override_str = '<Override PartName="/customUI/customUI14.xml" ContentType="application/vnd.ms-office.customUI+xml" />'
-                ct_content = ct_content.replace('</Types>', f'  {override_str}\n</Types>')
-                with open(content_types_path, 'w', encoding='utf-8') as f:
-                    f.write(ct_content)
-        
-        with zipfile.ZipFile(dotm_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for root, _, files in os.walk(tmpdir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, tmpdir)
-                    # OpenXML STRICTLY requires forward slashes. zipfile on Windows will write backslashes unless forced.
-                    arcname = arcname.replace('\\', '/')
-                    zout.write(file_path, arcname)
-    print("Custom Ribbon UI injected successfully.")
+    import subprocess
+    ps_script = f"""
+Add-Type -AssemblyName WindowsBase
+$docPath = "{dotm_path}"
+$xmlPath = "{custom_ui_path}"
+
+try {{
+    $package = [System.IO.Packaging.Package]::Open($docPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite)
+
+    # Define URI
+    $uiUri = [System.IO.Packaging.PackUriHelper]::CreatePartUri([System.Uri]("/customUI/customUI14.xml", [System.UriKind]::Relative))
+
+    # Remove existing UI part if it exists
+    if ($package.PartExists($uiUri)) {{
+        $package.DeletePart($uiUri)
+    }}
+
+    # Remove existing relationships
+    $relType = "http://schemas.microsoft.com/office/2006/relationships/ui/extensibility"
+    foreach ($rel in $package.GetRelationshipsByType($relType)) {{
+        $package.DeleteRelationship($rel.Id)
+    }}
+
+    # Create new part and write XML
+    $part = $package.CreatePart($uiUri, "application/xml")
+    $xmlContent = [System.IO.File]::ReadAllBytes($xmlPath)
+    $stream = $part.GetStream()
+    $stream.Write($xmlContent, 0, $xmlContent.Length)
+    $stream.Close()
+
+    # Create relationship
+    $package.CreateRelationship($uiUri, [System.IO.Packaging.TargetMode]::Internal, $relType)
+    $package.Close()
+}} catch {{
+    Write-Error $_.Exception.Message
+    exit 1
+}}
+"""
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_script], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Failed to inject Ribbon XML via PowerShell:\n{result.stderr}\n{result.stdout}")
+    else:
+        print("Custom Ribbon UI injected successfully.")
 
 def build_dotm():
     base_dir = os.path.dirname(os.path.abspath(__file__))
