@@ -177,6 +177,52 @@ Private Sub ProcessStandardRedlineStory(ByVal storyRange As Range, ByVal totalRe
 End Sub
 
 ' ==============================================================================
+' 2.5 STANDARD REDLINE (SELECTION ONLY)
+' ==============================================================================
+Public Sub MW_StandardRedlineSelection()
+    Const PROGRESS_INTERVAL As Long = 50
+    Dim doc As Document
+    Dim selectionRange As Range
+    Dim totalRevisions As Long, completedRevisions As Long
+    Dim insertionCount As Long, deletionCount As Long
+    Dim startTime As Single
+    Dim processingSucceeded As Boolean
+
+    On Error GoTo CleanFail
+    Set doc = ActiveDocument
+
+    If doc.ReadOnly Then MsgBox "The active document is read-only.", vbExclamation, "Standard Redline Selection": Exit Sub
+    If doc.ProtectionType <> wdNoProtection Then MsgBox "The active document is protected. Remove protection before running this macro.", vbExclamation, "Standard Redline Selection": Exit Sub
+    
+    If Selection.Type = wdSelectionIP Then MsgBox "Please select some text first.", vbInformation, "Standard Redline Selection": Exit Sub
+
+    Set selectionRange = Selection.Range
+    totalRevisions = selectionRange.Revisions.Count
+    If totalRevisions = 0 Then MsgBox "The selected text contains no tracked changes.", vbInformation, "Standard Redline Selection": Exit Sub
+
+    Mod_Utilities.StartOptimization
+    startTime = Timer
+
+    ProcessStandardRedlineStory selectionRange, totalRevisions, completedRevisions, insertionCount, deletionCount, startTime, PROGRESS_INTERVAL
+    
+    processingSucceeded = True
+
+CleanExit:
+    Mod_Utilities.EndOptimization
+    
+    If processingSucceeded Then
+        MsgBox "Standard redline selection complete." & vbCrLf & vbCrLf & "Total revisions processed: " & completedRevisions & " of " & totalRevisions & vbCrLf & "Elapsed time: " & Mod_Utilities.FormatDuration(Mod_Utilities.GetElapsedSeconds(startTime)), vbInformation, "Standard Redline Complete"
+    Else
+        MsgBox "The macro stopped because of an error.", vbCritical, "Error"
+    End If
+    Exit Sub
+
+CleanFail:
+    processingSucceeded = False
+    Resume CleanExit
+End Sub
+
+' ==============================================================================
 ' 3. SHARED HELPERS
 ' ==============================================================================
 Private Function CountAllStoryRevisions(ByVal doc As Document) As Long

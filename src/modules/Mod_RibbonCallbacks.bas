@@ -10,6 +10,10 @@ Public Sub OnAction_StandardRedline(control As Object)
     Call Mod_Redlines.MW_StandardRedline
 End Sub
 
+Public Sub OnAction_StandardRedlineSelection(control As Object)
+    Call Mod_Redlines.MW_StandardRedlineSelection
+End Sub
+
 ' --- Document Cleanup ---
 Public Sub OnAction_RemoveSpaces(control As Object)
     Call Mod_Cleanup.MW_RemoveMultipleSpaces
@@ -37,6 +41,10 @@ End Sub
 
 Public Sub OnAction_StandardRedline_Fallback()
     Call OnAction_StandardRedline(Nothing)
+End Sub
+
+Public Sub OnAction_StandardRedlineSelection_Fallback()
+    Call OnAction_StandardRedlineSelection(Nothing)
 End Sub
 
 Public Sub OnAction_RemoveSpaces_Fallback()

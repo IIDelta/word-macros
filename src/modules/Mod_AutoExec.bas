@@ -27,10 +27,17 @@ Public Sub AutoExec()
     
     ' Button 2: Standard Redline
     Set btn = cb.Controls.Add(Type:=1)
-    btn.Caption = "Standard Redline"
+    btn.Caption = "Standard Redline (Whole Doc)"
     btn.Style = 3
     btn.FaceId = 111 ' Document compare icon
     btn.OnAction = "Mod_RibbonCallbacks.OnAction_StandardRedline_Fallback"
+    
+    ' Button 2.5: Standard Redline Selection
+    Set btn = cb.Controls.Add(Type:=1)
+    btn.Caption = "Standard Redline (Selection)"
+    btn.Style = 3
+    btn.FaceId = 112 ' Alternate icon
+    btn.OnAction = "Mod_RibbonCallbacks.OnAction_StandardRedlineSelection_Fallback"
     
     ' Button 3: Remove Spaces
     Set btn = cb.Controls.Add(Type:=1)
