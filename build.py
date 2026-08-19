@@ -87,29 +87,6 @@ def build_dotm():
         doc.Save()
         doc.Close()
         print("Build successful!")
-        
-        # Inject Custom UI
-        inject_custom_ui(dotm_path, custom_ui_path)
-        
-        # Deploy to Word STARTUP folder
-        appdata = os.environ.get('APPDATA')
-        if appdata:
-            startup_dir = os.path.join(appdata, 'Microsoft', 'Word', 'STARTUP')
-            os.makedirs(startup_dir, exist_ok=True)
-            dest_path = os.path.join(startup_dir, 'MedicalWritingTools.dotm')
-            try:
-                shutil.copy2(dotm_path, dest_path)
-                print(f"Auto-deployed successfully to: {dest_path}")
-            except Exception as cp_err:
-                print(f"Warning: Could not copy to STARTUP folder. Please ensure Word is closed. Error: {cp_err}")
-    except PermissionError as pe:
-        msg = ("Permission Denied: Word is currently locking the template.\n\n"
-               "Please fully close Microsoft Word (and ensure no instances are running in the background) before running the build.")
-        print(f"Build failed: {msg}\nError details: {pe}")
-        try:
-            ctypes.windll.user32.MessageBoxW(0, msg, "Build Error: File Locked", 0x10)
-        except:
-            pass
     except Exception as e:
         err_msg = str(e)
         print(f"Build failed: {err_msg}")
@@ -120,11 +97,43 @@ def build_dotm():
                    "and check 'Trust access to the VBA project object model'.")
             print(msg)
             try:
-                ctypes.windll.user32.MessageBoxW(0, msg, "Build Error: Macro Security", 0x10) # 0x10 = Error Icon
+                ctypes.windll.user32.MessageBoxW(0, msg, "Build Error: Macro Security", 0x10)
             except:
                 pass
+        sys.exit(1)
     finally:
-        word.Quit()
+        try:
+            word.Quit()
+        except:
+            pass
+
+    # Now that Word is fully closed and locks are released, we can inject UI and deploy
+    try:
+        import time
+        time.sleep(0.5) # Allow OS to fully release file locks
+
+        # Inject Custom UI
+        inject_custom_ui(dotm_path, custom_ui_path)
+        
+        # Deploy to Word STARTUP folder
+        appdata = os.environ.get('APPDATA')
+        if appdata:
+            startup_dir = os.path.join(appdata, 'Microsoft', 'Word', 'STARTUP')
+            os.makedirs(startup_dir, exist_ok=True)
+            dest_path = os.path.join(startup_dir, 'MedicalWritingTools.dotm')
+            shutil.copy2(dotm_path, dest_path)
+            print(f"Auto-deployed successfully to: {dest_path}")
+            
+    except PermissionError as pe:
+        msg = ("Permission Denied: Word is currently locking the template.\n\n"
+               "Please fully close Microsoft Word (and ensure no instances are running in the background) before running the build.")
+        print(f"Build failed: {msg}\nError details: {pe}")
+        try:
+            ctypes.windll.user32.MessageBoxW(0, msg, "Build Error: File Locked", 0x10)
+        except:
+            pass
+    except Exception as e:
+        print(f"Post-build step failed: {e}")
 
 if __name__ == "__main__":
     build_dotm()
