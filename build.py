@@ -134,10 +134,12 @@ def build_dotm():
                 msg = ("Deploy failed: The destination file in your STARTUP folder is locked.\n\n"
                        "If Microsoft Word is fully closed, please close Microsoft Outlook. "
                        "Outlook uses Word's engine for emails and will lock Word add-ins.\n\n"
-                       "The local build in /dist/ was successful, but auto-deployment was skipped.")
+                       "The local build in /dist/ was successful.\n\n"
+                       "To install manually, you can copy 'dist\\MedicalWritingTools.dotm' to:\n"
+                       "%APPDATA%\\Microsoft\\Word\\STARTUP")
                 print(f"\n{msg}\nError details: {deploy_pe}")
                 try:
-                    ctypes.windll.user32.MessageBoxW(0, msg, "Deploy Error: Outlook/Word is locking STARTUP", 0x30)
+                    ctypes.windll.user32.MessageBoxW(0, msg, "Deploy Error: STARTUP Folder Locked", 0x30)
                 except:
                     pass
             
