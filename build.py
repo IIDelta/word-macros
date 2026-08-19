@@ -53,9 +53,31 @@ def build_dotm():
     print("Starting Microsoft Word...")
     try:
         word = win32com.client.Dispatch("Word.Application")
-    except Exception as e:
-        print(f"Failed to dispatch Word.Application. Ensure you are running this on a Windows machine with Microsoft Word installed.\nError details: {e}")
-        sys.exit(1)
+    except Exception as e1:
+        print(f"Initial COM connection failed: {e1}")
+        print("Attempting to recover by killing hung background Word processes and clearing COM cache...")
+        import platform
+        if platform.system() == "Windows":
+            os.system("taskkill /F /IM WINWORD.EXE /T >nul 2>&1")
+        import time
+        time.sleep(2)
+        
+        # Clear win32com cache
+        try:
+            import tempfile
+            gen_py_path = os.path.join(tempfile.gettempdir(), 'gen_py')
+            if os.path.exists(gen_py_path):
+                shutil.rmtree(gen_py_path)
+        except:
+            pass
+            
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+            word = win32com.client.dynamic.Dispatch("Word.Application")
+        except Exception as e2:
+            print(f"\n[FATAL ERROR] Failed to dispatch Word.Application even after recovery.\nError details: {e2}")
+            sys.exit(1)
         
     word.Visible = False
     word.AutomationSecurity = 1 # msoAutomationSecurityLow (enables macros without prompts during automation)
