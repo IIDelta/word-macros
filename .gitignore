@@ -4,3 +4,6 @@
 
 # Ignore Mac OS hidden files (if any team members use Mac)
 .DS_Store
+
+# ignore word fils
+*.docx
