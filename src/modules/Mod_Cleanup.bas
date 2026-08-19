@@ -5,29 +5,51 @@ Option Explicit
 ' 1. REMOVE MULTIPLE SPACES
 ' ==============================================================================
 Public Sub MW_RemoveMultipleSpaces()
-    Dim storyRange As Range, searchRange As Range
-    Application.ScreenUpdating = False
-
+    Dim storyRange As Range
+    Dim startTime As Single
+    Dim processingSucceeded As Boolean
+    
+    On Error GoTo CleanFail
+    
+    If ActiveDocument.ReadOnly Or ActiveDocument.ProtectionType <> wdNoProtection Then
+        MsgBox "Document is read-only or protected.", vbExclamation, "Remove Multiple Spaces"
+        Exit Sub
+    End If
+    
+    Mod_Utilities.StartOptimization
+    startTime = Timer
+    
     For Each storyRange In ActiveDocument.StoryRanges
-        Set searchRange = storyRange.Duplicate
-        With searchRange.Find
-            .ClearFormatting
-            .Text = " {2,}"
-            .Replacement.Text = " "
-            .Forward = True
-            .Wrap = wdFindStop
-            .Format = False
-            .MatchWildcards = True
-        End With
-
-        Do While searchRange.Find.Execute
-            If searchRange.Fields.Count = 0 Then searchRange.Text = " "
-            searchRange.Collapse wdCollapseEnd
+        Dim currentStory As Range
+        Set currentStory = storyRange
+        Do While Not currentStory Is Nothing
+            With currentStory.Find
+                .ClearFormatting
+                .Text = " {2,}"
+                .Replacement.Text = " "
+                .Forward = True
+                .Wrap = wdFindContinue
+                .Format = False
+                .MatchWildcards = True
+                .Execute Replace:=wdReplaceAll
+            End With
+            Set currentStory = currentStory.NextStoryRange
         Loop
     Next storyRange
+    
+    processingSucceeded = True
 
-    Application.ScreenUpdating = True
-    MsgBox "Multiple spaces removed (fields preserved).", vbInformation
+CleanExit:
+    Mod_Utilities.EndOptimization
+    If processingSucceeded Then
+        MsgBox "Multiple spaces removed." & vbCrLf & "Elapsed time: " & Mod_Utilities.FormatDuration(Mod_Utilities.GetElapsedSeconds(startTime)), vbInformation, "Complete"
+    Else
+        MsgBox "An error occurred.", vbCritical, "Error"
+    End If
+    Exit Sub
+CleanFail:
+    processingSucceeded = False
+    Resume CleanExit
 End Sub
 
 ' ==============================================================================
@@ -38,11 +60,13 @@ Public Sub MW_UpdateFields()
     Dim toc As TableOfContents, tof As TableOfFigures, toa As TableOfAuthorities
     Set doc = ActiveDocument
 
-    Application.ScreenUpdating = False
+    Mod_Utilities.StartOptimization
 
     For Each storyRange In doc.StoryRanges
         Do
+            On Error Resume Next
             storyRange.Fields.Update
+            On Error GoTo 0
             Set storyRange = storyRange.NextStoryRange
         Loop Until storyRange Is Nothing
     Next storyRange
@@ -51,7 +75,7 @@ Public Sub MW_UpdateFields()
     For Each tof In doc.TablesOfFigures: tof.Update: Next tof
     For Each toa In doc.TablesOfAuthorities: toa.Update: Next toa
 
-    Application.ScreenUpdating = True
+    Mod_Utilities.EndOptimization
     MsgBox "All document fields have been fully updated.", vbInformation
 End Sub
 
@@ -60,35 +84,30 @@ End Sub
 ' ==============================================================================
 Public Sub MW_DeleteHiddenText()
     Dim doc As Document, storyRange As Range, currentStoryRange As Range, nextStoryRange As Range
-    Dim originalScreenUpdating As Boolean, originalTrackRevisions As Boolean, originalShowHidden As Boolean, settingsCaptured As Boolean
-    Dim deletedRangeCount As Long, processingSucceeded As Boolean, errorNumber As Long, errorDescription As String
+    Dim deletedRangeCount As Long, processingSucceeded As Boolean
     Dim userResponse As VbMsgBoxResult
+    Dim startTime As Single
 
     On Error GoTo CleanFail
     Set doc = ActiveDocument
 
-    If doc.ReadOnly Then MsgBox "The active document is read-only.", vbExclamation, "Delete Hidden Text": Exit Sub
-    If doc.ProtectionType <> wdNoProtection Then MsgBox "The active document is protected. Remove protection before running this macro.", vbExclamation, "Delete Hidden Text": Exit Sub
+    If doc.ReadOnly Or doc.ProtectionType <> wdNoProtection Then
+        MsgBox "Document is read-only or protected.", vbExclamation, "Delete Hidden Text"
+        Exit Sub
+    End If
 
     userResponse = MsgBox("This macro permanently deletes ordinary text formatted as Hidden." & vbCrLf & vbCrLf & "Run it only on a saved copy or backup. Continue?", vbYesNo + vbExclamation + vbDefaultButton2, "Delete Hidden Text")
     If userResponse <> vbYes Then Exit Sub
 
-    originalScreenUpdating = Application.ScreenUpdating
-    originalTrackRevisions = doc.TrackRevisions
-    If Not ActiveWindow Is Nothing Then
-        originalShowHidden = ActiveWindow.View.ShowHiddenText
-        ActiveWindow.View.ShowHiddenText = True
-    End If
-    settingsCaptured = True
-    Application.ScreenUpdating = False
-    Application.StatusBar = "Deleting hidden text..."
-    doc.TrackRevisions = False
+    Mod_Utilities.StartOptimization
+    startTime = Timer
 
     For Each storyRange In doc.StoryRanges
         Set currentStoryRange = storyRange
         Do While Not currentStoryRange Is Nothing
             Set nextStoryRange = currentStoryRange.NextStoryRange
             Application.StatusBar = "Deleting hidden text in Story Type " & currentStoryRange.StoryType & "..."
+            DoEvents
             deletedRangeCount = deletedRangeCount + DeleteHiddenTextFromStory(currentStoryRange)
             Set currentStoryRange = nextStoryRange
         Loop
@@ -96,25 +115,15 @@ Public Sub MW_DeleteHiddenText()
     processingSucceeded = True
 
 CleanExit:
-    On Error Resume Next
-    If settingsCaptured Then
-        doc.TrackRevisions = originalTrackRevisions
-        Application.ScreenUpdating = originalScreenUpdating
-        If Not ActiveWindow Is Nothing Then ActiveWindow.View.ShowHiddenText = originalShowHidden
-    End If
-    Application.StatusBar = False
-    On Error GoTo 0
-
+    Mod_Utilities.EndOptimization
     If processingSucceeded Then
-        MsgBox "Hidden text deletion complete." & vbCrLf & vbCrLf & "Document layers processed: " & deletedRangeCount & vbCrLf & vbCrLf & "Review the document before saving.", vbInformation, "Delete Hidden Text Complete"
-    ElseIf errorNumber <> 0 Then
-        MsgBox "The macro stopped because of an error." & vbCrLf & "Error " & errorNumber & ": " & errorDescription, vbCritical, "Delete Hidden Text Error"
+        MsgBox "Hidden text deletion complete." & vbCrLf & vbCrLf & "Document layers processed: " & deletedRangeCount & vbCrLf & "Elapsed time: " & Mod_Utilities.FormatDuration(Mod_Utilities.GetElapsedSeconds(startTime)), vbInformation, "Delete Hidden Text Complete"
+    Else
+        MsgBox "An error occurred.", vbCritical, "Error"
     End If
     Exit Sub
 
 CleanFail:
-    errorNumber = Err.Number
-    errorDescription = Err.Description
     processingSucceeded = False
     Resume CleanExit
 End Sub

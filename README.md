@@ -1,6 +1,16 @@
 # IIDelta Medical Writing Tools
 
-A centralized Word Add-in (`.dotm`) containing a suite of VBA macros and a custom Ribbon tab designed to automate formatting, visual redlining, and document cleanup for regulatory submissions.
+A centralized Word Add-in (`.dotm`) containing a suite of highly optimized VBA macros and a custom Ribbon tab designed to automate formatting, visual redlining, and document cleanup for regulatory submissions.
+
+## 🚀 Features (V1)
+- **Yellow Highlight Redline**: Converts tracked changes to yellow highlighted text.
+- **Standard Redline**: Converts tracked changes to standard red font and strikethrough.
+- **Remove Multiple Spaces**: Instantly cleans up irregular spacing.
+- **Delete Hidden Text**: Permanently deletes hidden text.
+- **Update Fields**: Refreshes all TOCs, tables, and document fields.
+- **Reopen Comments**: Marks all resolved comments as active.
+
+*Note: Large macros include a progress bar and ETA in the Word Status Bar and allow interacting with other documents during execution.*
 
 ## 📦 Installation for End Users
 
@@ -12,25 +22,34 @@ A centralized Word Add-in (`.dotm`) containing a suite of VBA macros and a custo
 
 ## 🛠️ Development Architecture
 
-This repository separates raw VBA source code from the compiled Word Add-in for version control and AI-assisted (Antigravity) development.
+This repository separates raw VBA source code from the compiled Word Add-in for version control. We use Python via COM on Windows to compile and test the macros.
 
 ### Folder Structure
 
 *   `/src/modules/`: Contains the raw, plain-text VBA modules (`.bas`). All logic edits happen here.
 *   `/src/customUI/`: Contains the `customUI.xml` file defining the Ribbon buttons and callbacks.
 *   `/dist/`: Contains the compiled `IIDelta_MW_Tools.dotm` Global Template.
+*   `/tests/`: Contains automated test scripts.
 
-### The Component Map
-
-1.  **`Mod_RibbonCallbacks.bas`**: The switchboard. Contains no logic. Only routes Ribbon clicks to target macros.
-2.  **`Mod_Redlines.bas`**: Contains the complex algorithms for converting Tracked Changes into static visual formatting (Yellow Highlight and Standard Redline).
-3.  **`Mod_Cleanup.bas`**: Houses document sterilization tools (Delete Hidden Text, Remove Multiple Spaces, Update Fields).
-4.  **`Mod_Review.bas`**: Houses reviewer tools (Reopen Comments).
+### Prerequisites for Building and Testing
+You must run these tools on a **Windows machine** with Microsoft Word installed.
+```cmd
+pip install -r requirements.txt
+```
 
 ### How to Compile Updates
 
-Because VBA cannot be compiled via the CLI, use this workflow:
-1. Update the `.bas` code in `/src/modules/`.
-2. Open `/dist/IIDelta_MW_Tools.dotm` in Word.
-3. Open the VBA Editor (`Alt + F11`), remove the old module, and import the newly updated `.bas` file.
-4. Save the `.dotm` file and commit to Git.
+We use an automated build script to inject the `.bas` files into the binary `.dotm` file.
+
+```cmd
+python build.py
+```
+*If you receive an error, ensure that **"Trust access to the VBA project object model"** is enabled in Word (File > Options > Trust Center > Trust Center Settings > Macro Settings).*
+
+### How to Run Automated Tests
+
+The testing suite will launch a hidden Word instance, apply the macros to mock data, and verify the output.
+
+```cmd
+python tests/test_macros.py
+```
