@@ -24,14 +24,14 @@ def inject_custom_ui(dotm_path, custom_ui_path):
         
         custom_ui_dir = os.path.join(tmpdir, 'customUI')
         os.makedirs(custom_ui_dir, exist_ok=True)
-        shutil.copy2(custom_ui_path, os.path.join(custom_ui_dir, 'customUI.xml'))
+        shutil.copy2(custom_ui_path, os.path.join(custom_ui_dir, 'customUI14.xml'))
         
         rels_path = os.path.join(tmpdir, '_rels', '.rels')
         if os.path.exists(rels_path):
             with open(rels_path, 'r', encoding='utf-8') as f:
                 rels_content = f.read()
-            if 'customUI.xml' not in rels_content:
-                rel_str = '<Relationship Id="customUIRelID" Type="http://schemas.microsoft.com/office/2006/relationships/ui/extensibility" Target="customUI/customUI.xml"/>'
+            if 'customUI14.xml' not in rels_content:
+                rel_str = '<Relationship Id="customUIRelID" Type="http://schemas.microsoft.com/office/2009/relationships/ui/extensibility" Target="customUI/customUI14.xml"/>'
                 rels_content = rels_content.replace('</Relationships>', f'  {rel_str}\n</Relationships>')
                 with open(rels_path, 'w', encoding='utf-8') as f:
                     f.write(rels_content)
