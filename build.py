@@ -52,7 +52,7 @@ def build_dotm():
 
     print("Starting Microsoft Word...")
     try:
-        word = win32com.client.Dispatch("Word.Application")
+        word = win32com.client.DispatchEx("Word.Application")
     except Exception as e:
         print(f"Failed to dispatch Word.Application. Ensure you are running this on a Windows machine with Microsoft Word installed.\nError details: {e}")
         sys.exit(1)
@@ -127,25 +127,36 @@ def build_dotm():
             os.makedirs(startup_dir, exist_ok=True)
             dest_path = os.path.join(startup_dir, 'MedicalWritingTools.dotm')
             
-            try:
-                shutil.copy2(dotm_path, dest_path)
-                print(f"Auto-deployed successfully to: {dest_path}")
-            except PermissionError as deploy_pe:
-                msg = ("Deploy failed: The destination file in your STARTUP folder is locked.\n\n"
-                       "If Microsoft Word is fully closed, please close Microsoft Outlook. "
-                       "Outlook uses Word's engine for emails and will lock Word add-ins.\n\n"
-                       "The local build in /dist/ was successful.\n\n"
-                       "Opening the STARTUP folder for you now. You can manually copy 'dist\\MedicalWritingTools.dotm' there.")
-                print(f"\n{msg}\n\nManual installation path: {startup_dir}\nError details: {deploy_pe}")
+            deployed = False
+            while not deployed:
                 try:
-                    os.startfile(startup_dir)
-                except Exception as e:
-                    print(f"Could not open file explorer: {e}")
-                
-                try:
-                    ctypes.windll.user32.MessageBoxW(0, msg, "Deploy Error: STARTUP Folder Locked", 0x30)
-                except:
-                    pass
+                    shutil.copy2(dotm_path, dest_path)
+                    print(f"Auto-deployed successfully to: {dest_path}")
+                    deployed = True
+                except PermissionError as deploy_pe:
+                    print(f"\n[Deploy Error] The destination file '{dest_path}' is locked.")
+                    print("This happens when Microsoft Word or Outlook is running in the background.")
+                    ans = input("Would you like to forcefully close all Word processes now to complete deployment? (y/n): ")
+                    if ans.lower().strip() == 'y':
+                        print("Forcefully closing WINWORD.EXE...")
+                        os.system("taskkill /F /IM WINWORD.EXE /T >nul 2>&1")
+                        import time
+                        time.sleep(2) # Give Windows a moment to release file handles
+                    else:
+                        msg = ("Deploy failed: The destination file in your STARTUP folder is locked.\n\n"
+                               "The local build in /dist/ was successful.\n\n"
+                               "Opening the STARTUP folder for you now. You can manually copy 'dist\\MedicalWritingTools.dotm' there.")
+                        print(f"\n{msg}\n\nManual installation path: {startup_dir}\nError details: {deploy_pe}")
+                        try:
+                            os.startfile(startup_dir)
+                        except Exception as e:
+                            print(f"Could not open file explorer: {e}")
+                        
+                        try:
+                            ctypes.windll.user32.MessageBoxW(0, msg, "Deploy Error: STARTUP Folder Locked", 0x30)
+                        except:
+                            pass
+                        break
             
     except PermissionError as pe:
         msg = ("Build failed: The local template in /dist/ is locked.\n\n"
