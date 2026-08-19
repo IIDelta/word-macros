@@ -31,7 +31,7 @@ def inject_custom_ui(dotm_path, custom_ui_path):
             with open(rels_path, 'r', encoding='utf-8') as f:
                 rels_content = f.read()
             if 'customUI14.xml' not in rels_content:
-                rel_str = '<Relationship Id="customUIRelID" Type="http://schemas.microsoft.com/office/2009/relationships/ui/extensibility" Target="customUI/customUI14.xml"/>'
+                rel_str = '<Relationship Id="customUIRelID" Type="http://schemas.microsoft.com/office/2007/relationships/ui/extensibility" Target="customUI/customUI14.xml"/>'
                 rels_content = rels_content.replace('</Relationships>', f'  {rel_str}\n</Relationships>')
                 with open(rels_path, 'w', encoding='utf-8') as f:
                     f.write(rels_content)
