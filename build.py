@@ -126,11 +126,23 @@ def build_dotm():
             startup_dir = os.path.join(appdata, 'Microsoft', 'Word', 'STARTUP')
             os.makedirs(startup_dir, exist_ok=True)
             dest_path = os.path.join(startup_dir, 'MedicalWritingTools.dotm')
-            shutil.copy2(dotm_path, dest_path)
-            print(f"Auto-deployed successfully to: {dest_path}")
+            
+            try:
+                shutil.copy2(dotm_path, dest_path)
+                print(f"Auto-deployed successfully to: {dest_path}")
+            except PermissionError as deploy_pe:
+                msg = ("Deploy failed: The destination file in your STARTUP folder is locked.\n\n"
+                       "If Microsoft Word is fully closed, please close Microsoft Outlook. "
+                       "Outlook uses Word's engine for emails and will lock Word add-ins.\n\n"
+                       "The local build in /dist/ was successful, but auto-deployment was skipped.")
+                print(f"\n{msg}\nError details: {deploy_pe}")
+                try:
+                    ctypes.windll.user32.MessageBoxW(0, msg, "Deploy Error: Outlook/Word is locking STARTUP", 0x30)
+                except:
+                    pass
             
     except PermissionError as pe:
-        msg = ("Permission Denied: Word is currently locking the template.\n\n"
+        msg = ("Build failed: The local template in /dist/ is locked.\n\n"
                "Please fully close Microsoft Word (and ensure no instances are running in the background) before running the build.")
         print(f"Build failed: {msg}\nError details: {pe}")
         try:
