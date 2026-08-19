@@ -51,3 +51,34 @@ CleanFail:
     processingSucceeded = False
     Resume CleanExit
 End Sub
+' ==============================================================================
+' ACCEPT CHANGES IN SELECTION (ALT + SHIFT + A)
+' ==============================================================================
+Public Sub MW_AcceptChangesInSelection()
+    On Error GoTo CleanFail
+    
+    If ActiveDocument.ReadOnly Or ActiveDocument.ProtectionType <> wdNoProtection Then
+        MsgBox "Document is read-only or protected.", vbExclamation, "Accept Changes"
+        Exit Sub
+    End If
+    
+    If Selection.Type = wdSelectionIP Then
+        MsgBox "Please select some text containing tracked changes first.", vbInformation, "Accept Changes"
+        Exit Sub
+    End If
+    
+    Dim revCount As Long
+    revCount = Selection.Range.Revisions.Count
+    
+    If revCount = 0 Then
+        MsgBox "No tracked changes found in the selected text.", vbInformation, "Accept Changes"
+        Exit Sub
+    End If
+    
+    Selection.Range.Revisions.AcceptAll
+    ' Optional: MsgBox revCount & " change(s) accepted.", vbInformation, "Accept Changes"
+
+    Exit Sub
+CleanFail:
+    MsgBox "An error occurred while accepting changes: " & Err.Description, vbCritical, "Error"
+End Sub

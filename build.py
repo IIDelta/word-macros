@@ -82,6 +82,17 @@ def build_dotm():
             print(f"Importing {os.path.basename(bas_file)}...")
             vb_comp.Import(bas_file)
             
+        # Embed Keyboard Shortcuts into the Add-in
+        try:
+            word.CustomizationContext = doc
+            # KeyCode: 65 = A, 1024 = Alt, 256 = Shift
+            key_code = word.BuildKeyCode(65, 1024, 256)
+            # wdKeyCategoryMacro = 2
+            word.KeyBindings.Add(KeyCategory=2, Command="MW_AcceptChangesInSelection", KeyCode=key_code)
+            print("Successfully embedded Alt+Shift+A shortcut.")
+        except Exception as key_e:
+            print(f"Warning: Could not embed keyboard shortcuts: {key_e}")
+            
         print("Saving document...")
         doc.Save()
         doc.Close()
