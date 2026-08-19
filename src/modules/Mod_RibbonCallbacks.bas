@@ -62,4 +62,3 @@ End Sub
 Public Sub OnAction_ReopenComments_Fallback()
     Call OnAction_ReopenComments(Nothing)
 End Sub
-End Sub
