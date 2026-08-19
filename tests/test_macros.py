@@ -13,7 +13,7 @@ class TestWordMacros(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        cls.dotm_path = os.path.join(cls.base_dir, 'dist', 'IIDelta_MW_Tools.dotm')
+        cls.dotm_path = os.path.join(cls.base_dir, 'dist', 'MedicalWritingTools.dotm')
         cls.test_doc_path = os.path.join(cls.base_dir, 'tests', 'mock_data.docx')
         
         if not os.path.exists(cls.dotm_path):

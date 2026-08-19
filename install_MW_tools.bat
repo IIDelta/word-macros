@@ -7,7 +7,7 @@ echo ===================================================
 echo.
 
 set "STARTUP_DIR=%APPDATA%\Microsoft\Word\STARTUP"
-set "SOURCE_FILE=%~dp0dist\IIDelta_MW_Tools.dotm"
+set "SOURCE_FILE=%~dp0dist\MedicalWritingTools.dotm"
 
 tasklist /FI "IMAGENAME eq winword.exe" 2>NUL | find /I /N "winword.exe">NUL
 if "%ERRORLEVEL%"=="0" (

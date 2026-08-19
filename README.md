@@ -28,7 +28,7 @@ This repository separates raw VBA source code from the compiled Word Add-in for 
 
 *   `/src/modules/`: Contains the raw, plain-text VBA modules (`.bas`). All logic edits happen here.
 *   `/src/customUI/`: Contains the `customUI.xml` file defining the Ribbon buttons and callbacks.
-*   `/dist/`: Contains the compiled `IIDelta_MW_Tools.dotm` Global Template.
+*   `/dist/`: Contains the compiled `MedicalWritingTools.dotm` Global Template.
 *   `/tests/`: Contains automated test scripts.
 
 ### Prerequisites for Building and Testing
