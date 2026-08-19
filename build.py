@@ -12,55 +12,7 @@ except ImportError:
     print("Error: pywin32 is not installed. Please run 'pip install -r requirements.txt'")
     sys.exit(1)
 
-def inject_custom_ui(dotm_path, custom_ui_path):
-    print("Injecting Custom Ribbon UI using native Windows OpenXML Packaging...")
-    if not os.path.exists(custom_ui_path):
-        print(f"Warning: Custom UI XML not found at {custom_ui_path}")
-        return
 
-    import subprocess
-    ps_script = f"""
-Add-Type -AssemblyName WindowsBase
-$docPath = "{dotm_path}"
-$xmlPath = "{custom_ui_path}"
-
-try {{
-    $package = [System.IO.Packaging.Package]::Open($docPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite)
-
-    # Define URI
-    $uiUri = [System.IO.Packaging.PackUriHelper]::CreatePartUri([System.Uri]("/customUI/customUI14.xml", [System.UriKind]::Relative))
-
-    # Remove existing UI part if it exists
-    if ($package.PartExists($uiUri)) {{
-        $package.DeletePart($uiUri)
-    }}
-
-    # Remove existing relationships
-    $relType = "http://schemas.microsoft.com/office/2007/relationships/ui/extensibility"
-    foreach ($rel in $package.GetRelationshipsByType($relType)) {{
-        $package.DeleteRelationship($rel.Id)
-    }}
-
-    # Create new part and write XML
-    $part = $package.CreatePart($uiUri, "application/vnd.ms-office.customui")
-    $xmlContent = [System.IO.File]::ReadAllBytes($xmlPath)
-    $stream = $part.GetStream()
-    $stream.Write($xmlContent, 0, $xmlContent.Length)
-    $stream.Close()
-
-    # Create relationship
-    $package.CreateRelationship($uiUri, [System.IO.Packaging.TargetMode]::Internal, $relType)
-    $package.Close()
-}} catch {{
-    Write-Error $_.Exception.Message
-    exit 1
-}}
-"""
-    result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_script], capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Failed to inject Ribbon XML via PowerShell:\n{result.stderr}\n{result.stdout}")
-    else:
-        print("Custom Ribbon UI injected successfully.")
 
 def build_dotm():
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -156,8 +108,6 @@ def build_dotm():
         import time
         time.sleep(1.5) # Allow OS to fully release file locks
 
-        # Inject Custom UI
-        inject_custom_ui(dotm_path, custom_ui_path)
         
         # Deploy to Word STARTUP folder
         appdata = os.environ.get('APPDATA')
