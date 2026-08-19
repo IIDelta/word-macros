@@ -36,7 +36,7 @@ try {{
     }}
 
     # Remove existing relationships
-    $relType = "http://schemas.microsoft.com/office/2006/relationships/ui/extensibility"
+    $relType = "http://schemas.microsoft.com/office/2007/relationships/ui/extensibility"
     foreach ($rel in $package.GetRelationshipsByType($relType)) {{
         $package.DeleteRelationship($rel.Id)
     }}
