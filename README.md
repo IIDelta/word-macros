@@ -1,6 +1,6 @@
 # IIDelta Medical Writing Tools
 
-A centralized Word Add-in (`.dotm`) containing a suite of highly optimized VBA macros and a custom Ribbon tab designed to automate formatting, visual redlining, and document cleanup for regulatory submissions.
+A centralized Word Add-in (`.dotm`) containing a suite of highly optimized VBA macros and a custom CommandBar (Add-Ins tab) designed to automate formatting, visual redlining, and document cleanup for regulatory submissions.
 
 ## 🚀 Features (V1)
 - **Yellow Highlight Redline**: Converts tracked changes to yellow highlighted text.
@@ -14,9 +14,13 @@ A centralized Word Add-in (`.dotm`) containing a suite of highly optimized VBA m
 
 ## 📦 Installation for End Users
 
-1. Close Microsoft Word completely.
-2. Double-click the `install_MW_tools.bat` script located in the repository root.
-3. Open Microsoft Word. The new **MW Tools** tab will be available on the Ribbon.
+To deploy this suite to your team, simply distribute the contents of the `dist/` folder:
+
+1. Send the `dist/MedicalWritingTools.dotm` file and `dist/install.bat` script to the end user.
+2. Have them double-click the `install.bat` script. This will automatically copy the `.dotm` file into their hidden Word `STARTUP` folder.
+3. Open Microsoft Word. The new macro suite will be automatically generated and available under the **Add-Ins** tab.
+
+**Important**: End users do **NOT** need to enable "Trust access to the VBA project object model". That setting is exclusively required for the developer running the Python build script. End users only need standard Macro security enabled to run the tools.
 
 ---
 
@@ -27,8 +31,7 @@ This repository separates raw VBA source code from the compiled Word Add-in for 
 ### Folder Structure
 
 *   `/src/modules/`: Contains the raw, plain-text VBA modules (`.bas`). All logic edits happen here.
-*   `/src/customUI/`: Contains the `customUI.xml` file defining the Ribbon buttons and callbacks.
-*   `/dist/`: Contains the compiled `MedicalWritingTools.dotm` Global Template.
+*   `/dist/`: Contains the compiled `MedicalWritingTools.dotm` Global Template and the `install.bat` deployment script.
 *   `/tests/`: Contains automated test scripts.
 
 ### Prerequisites for Building and Testing
