@@ -1,4 +1,4 @@
-# IIDelta Medical Writing Tools
+# Medical Writing Tools
 
 A centralized Word Add-in (`.dotm`) containing a suite of highly optimized VBA macros and a custom CommandBar (Add-Ins tab) designed to automate formatting, visual redlining, and document cleanup for regulatory submissions.
 
