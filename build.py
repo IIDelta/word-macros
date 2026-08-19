@@ -86,6 +86,8 @@ def build_dotm():
         print("Saving document...")
         doc.Save()
         doc.Close()
+        del vb_comp
+        del doc
         print("Build successful!")
     except Exception as e:
         err_msg = str(e)
@@ -104,13 +106,16 @@ def build_dotm():
     finally:
         try:
             word.Quit()
+            del word
+            import gc
+            gc.collect()
         except:
             pass
 
     # Now that Word is fully closed and locks are released, we can inject UI and deploy
     try:
         import time
-        time.sleep(0.5) # Allow OS to fully release file locks
+        time.sleep(1.5) # Allow OS to fully release file locks
 
         # Inject Custom UI
         inject_custom_ui(dotm_path, custom_ui_path)
