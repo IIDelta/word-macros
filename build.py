@@ -102,6 +102,14 @@ def build_dotm():
                 print(f"Auto-deployed successfully to: {dest_path}")
             except Exception as cp_err:
                 print(f"Warning: Could not copy to STARTUP folder. Please ensure Word is closed. Error: {cp_err}")
+    except PermissionError as pe:
+        msg = ("Permission Denied: Word is currently locking the template.\n\n"
+               "Please fully close Microsoft Word (and ensure no instances are running in the background) before running the build.")
+        print(f"Build failed: {msg}\nError details: {pe}")
+        try:
+            ctypes.windll.user32.MessageBoxW(0, msg, "Build Error: File Locked", 0x10)
+        except:
+            pass
     except Exception as e:
         err_msg = str(e)
         print(f"Build failed: {err_msg}")
