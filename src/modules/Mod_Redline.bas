@@ -103,6 +103,7 @@ End Sub
 ' ==============================================================================
 Public Sub MW_StandardRedline()
     Const PROGRESS_INTERVAL As Long = 50
+    Const DELETED_TEXT_STYLE_NAME As String = "DC PleaseReview Deleted Text"
     Dim doc As Document
     Dim storyRange As Range, currentStoryRange As Range, nextStoryRange As Range
     Dim totalRevisions As Long, completedRevisions As Long
@@ -120,13 +121,14 @@ Public Sub MW_StandardRedline()
     If totalRevisions = 0 Then MsgBox "The active document contains no tracked changes.", vbInformation, "Standard Redline": Exit Sub
 
     Mod_Utilities.StartOptimization
+    EnsureDeletedTextStyle doc, DELETED_TEXT_STYLE_NAME
     startTime = Timer
 
     For Each storyRange In doc.StoryRanges
         Set currentStoryRange = storyRange
         Do While Not currentStoryRange Is Nothing
             Set nextStoryRange = currentStoryRange.NextStoryRange
-            ProcessStandardRedlineStory currentStoryRange, totalRevisions, completedRevisions, insertionCount, deletionCount, startTime, PROGRESS_INTERVAL
+            ProcessStandardRedlineStory currentStoryRange, totalRevisions, completedRevisions, insertionCount, deletionCount, startTime, PROGRESS_INTERVAL, DELETED_TEXT_STYLE_NAME
             Set currentStoryRange = nextStoryRange
         Loop
     Next storyRange
@@ -147,7 +149,7 @@ CleanFail:
     Resume CleanExit
 End Sub
 
-Private Sub ProcessStandardRedlineStory(ByVal storyRange As Range, ByVal totalRevisions As Long, ByRef completedRevisions As Long, ByRef insertionCount As Long, ByRef deletionCount As Long, ByVal startTime As Single, ByVal progressInterval As Long)
+Private Sub ProcessStandardRedlineStory(ByVal storyRange As Range, ByVal totalRevisions As Long, ByRef completedRevisions As Long, ByRef insertionCount As Long, ByRef deletionCount As Long, ByVal startTime As Single, ByVal progressInterval As Long, ByVal deletedTextStyleName As String)
     Dim rev As Revision, rngInserted As Range, rngDeleted As Range
     Dim revisionType As Long
 
@@ -160,12 +162,7 @@ Private Sub ProcessStandardRedlineStory(ByVal storyRange As Range, ByVal totalRe
                 rngInserted.Font.Color = wdColorRed
                 insertionCount = insertionCount + 1
             Case wdRevisionDelete, wdRevisionMovedFrom, wdRevisionCellDeletion
-                Set rngDeleted = rev.Range.Duplicate
-                With rngDeleted.Font
-                    .Color = wdColorRed
-                    .StrikeThrough = True
-                End With
-                rev.Reject
+                MarkRestoredDeletion rev, deletedTextStyleName, False
                 deletionCount = deletionCount + 1
             Case Else
                 rev.Accept
@@ -181,6 +178,7 @@ End Sub
 ' ==============================================================================
 Public Sub MW_StandardRedlineSelection()
     Const PROGRESS_INTERVAL As Long = 50
+    Const DELETED_TEXT_STYLE_NAME As String = "DC PleaseReview Deleted Text"
     Dim doc As Document
     Dim selectionRange As Range
     Dim totalRevisions As Long, completedRevisions As Long
@@ -201,9 +199,10 @@ Public Sub MW_StandardRedlineSelection()
     If totalRevisions = 0 Then MsgBox "The selected text contains no tracked changes.", vbInformation, "Standard Redline Selection": Exit Sub
 
     Mod_Utilities.StartOptimization
+    EnsureDeletedTextStyle doc, DELETED_TEXT_STYLE_NAME
     startTime = Timer
 
-    ProcessStandardRedlineStory selectionRange, totalRevisions, completedRevisions, insertionCount, deletionCount, startTime, PROGRESS_INTERVAL
+    ProcessStandardRedlineStory selectionRange, totalRevisions, completedRevisions, insertionCount, deletionCount, startTime, PROGRESS_INTERVAL, DELETED_TEXT_STYLE_NAME
     
     processingSucceeded = True
 
