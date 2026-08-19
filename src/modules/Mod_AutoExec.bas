@@ -1,34 +1,48 @@
 Attribute VB_Name = "Mod_AutoExec"
+Option Explicit
+
 Public Sub AutoExec()
-    ' This macro runs automatically when the global template loads.
-    ' To prevent startup race conditions where Word's UI is not yet fully initialized,
-    ' we delay the toolbar creation by 1 second.
-    Application.OnTime When:=Now + TimeValue("00:00:01"), Name:="Mod_AutoExec.CreateMWToolbar"
+    ' Runs when the Add-in is loaded at Word startup
+    CreateMWToolbar
+End Sub
+
+Public Sub AutoOpen()
+    ' Runs when an existing document is opened
+    CreateMWToolbar
+End Sub
+
+Public Sub AutoNew()
+    ' Runs when a new blank document is created
+    CreateMWToolbar
 End Sub
 
 Public Sub CreateMWToolbar()
     Dim cb As Object ' CommandBar
     Dim btn As Object ' CommandBarButton
+    Dim existingBar As Object
     
-    On Error GoTo ErrorHandler
-    
-    ' Set the customization context to this add-in template,
-    ' preventing issues if Normal.dotm is locked or busy.
-    CustomizationContext = ThisDocument
-    
-    ' 1. Delete the existing toolbar if it exists to prevent duplicates
+    ' Check if the toolbar already exists (created by a previous event)
     On Error Resume Next
-    Application.CommandBars("MW Tools").Delete
+    Set existingBar = Application.CommandBars("MW Tools")
+    On Error GoTo 0
+    
+    If Not existingBar Is Nothing Then
+        ' It already exists, just ensure it's visible and exit to prevent duplicates/flashing
+        existingBar.Visible = True
+        Exit Sub
+    End If
+    
     On Error GoTo ErrorHandler
     
-    ' 2. Create the new toolbar
-    ' Position:=msoBarTop (1)
+    ' Explicitly use NormalTemplate. 
+    ' If we use ThisDocument (the add-in), it's often loaded strictly as Read-Only, 
+    ' which causes CommandBar modifications to fail silently.
+    CustomizationContext = NormalTemplate
+    
+    ' Create the new toolbar as a Temporary bar (lives only for this Word session)
     Set cb = Application.CommandBars.Add(Name:="MW Tools", Position:=1, Temporary:=True)
     
-    ' 3. Add buttons
-    
     ' Button 1: Yellow Redline
-    ' Type:=msoControlButton (1)
     Set btn = cb.Controls.Add(Type:=1)
     btn.Caption = "Yellow Highlight Redline"
     btn.Style = 3 ' msoButtonIconAndCaption
@@ -77,19 +91,18 @@ Public Sub CreateMWToolbar()
     btn.FaceId = 1589 ' Comments icon
     btn.OnAction = "Mod_RibbonCallbacks.OnAction_ReopenComments_Fallback"
     
-    ' 4. Make it visible
+    ' Make it visible
     cb.Visible = True
-    
     Exit Sub
 
 ErrorHandler:
-    MsgBox "MW Tools Add-In encountered an error while building the ribbon: " & Err.Description, vbCritical, "MW Tools Add-In Error"
+    ' If it fails (e.g., Zotero locked the CommandBars collection), we ignore it here.
+    ' AutoOpen/AutoNew will try again when a document is actually opened!
 End Sub
 
 Public Sub AutoExit()
     ' Clean up when Word closes
     On Error Resume Next
-    CustomizationContext = ThisDocument
     Application.CommandBars("MW Tools").Delete
     On Error GoTo 0
 End Sub
