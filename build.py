@@ -52,6 +52,8 @@ def inject_custom_ui(dotm_path, custom_ui_path):
                 for file in files:
                     file_path = os.path.join(root, file)
                     arcname = os.path.relpath(file_path, tmpdir)
+                    # OpenXML STRICTLY requires forward slashes. zipfile on Windows will write backslashes unless forced.
+                    arcname = arcname.replace('\\', '/')
                     zout.write(file_path, arcname)
     print("Custom Ribbon UI injected successfully.")
 
