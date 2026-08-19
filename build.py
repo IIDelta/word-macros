@@ -7,6 +7,7 @@ import tempfile
 
 try:
     import win32com.client
+    import ctypes
 except ImportError:
     print("Error: pywin32 is not installed. Please run 'pip install -r requirements.txt'")
     sys.exit(1)
@@ -30,7 +31,7 @@ def inject_custom_ui(dotm_path, custom_ui_path):
             with open(rels_path, 'r', encoding='utf-8') as f:
                 rels_content = f.read()
             if 'customUI.xml' not in rels_content:
-                rel_str = '<Relationship Id="customUIRelID" Type="http://schemas.microsoft.com/office/2009/07/customui" Target="customUI/customUI.xml"/>'
+                rel_str = '<Relationship Id="customUIRelID" Type="http://schemas.microsoft.com/office/2006/relationships/ui/extensibility" Target="customUI/customUI.xml"/>'
                 rels_content = rels_content.replace('</Relationships>', f'  {rel_str}\n</Relationships>')
                 with open(rels_path, 'w', encoding='utf-8') as f:
                     f.write(rels_content)
@@ -57,6 +58,7 @@ def build_dotm():
         sys.exit(1)
         
     word.Visible = False
+    word.AutomationSecurity = 1 # msoAutomationSecurityLow (enables macros without prompts during automation)
     
     try:
         if not os.path.exists(dotm_path) or os.path.getsize(dotm_path) == 0:
@@ -101,8 +103,18 @@ def build_dotm():
             except Exception as cp_err:
                 print(f"Warning: Could not copy to STARTUP folder. Please ensure Word is closed. Error: {cp_err}")
     except Exception as e:
-        print(f"Build failed: {e}")
-        print("Note: Ensure 'Trust access to the VBA project object model' is enabled in Word -> File -> Options -> Trust Center -> Trust Center Settings -> Macro Settings.")
+        err_msg = str(e)
+        print(f"Build failed: {err_msg}")
+        if "VBProject" in err_msg or "Trust" in err_msg or "800a175d" in err_msg:
+            msg = ("Trust access to the VBA project object model is required.\n\n"
+                   "Please open Word, go to:\n"
+                   "File -> Options -> Trust Center -> Trust Center Settings -> Macro Settings\n"
+                   "and check 'Trust access to the VBA project object model'.")
+            print(msg)
+            try:
+                ctypes.windll.user32.MessageBoxW(0, msg, "Build Error: Macro Security", 0x10) # 0x10 = Error Icon
+            except:
+                pass
     finally:
         word.Quit()
 

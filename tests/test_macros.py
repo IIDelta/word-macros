@@ -23,6 +23,7 @@ class TestWordMacros(unittest.TestCase):
         try:
             cls.word = win32com.client.Dispatch("Word.Application")
             cls.word.Visible = False
+            cls.word.AutomationSecurity = 1 # msoAutomationSecurityLow
         except Exception as e:
             print(f"Failed to start Word: {e}")
             sys.exit(1)
