@@ -135,9 +135,13 @@ def build_dotm():
                        "If Microsoft Word is fully closed, please close Microsoft Outlook. "
                        "Outlook uses Word's engine for emails and will lock Word add-ins.\n\n"
                        "The local build in /dist/ was successful.\n\n"
-                       "To install manually, you can copy 'dist\\MedicalWritingTools.dotm' to:\n"
-                       "%APPDATA%\\Microsoft\\Word\\STARTUP")
-                print(f"\n{msg}\nError details: {deploy_pe}")
+                       "Opening the STARTUP folder for you now. You can manually copy 'dist\\MedicalWritingTools.dotm' there.")
+                print(f"\n{msg}\n\nManual installation path: {startup_dir}\nError details: {deploy_pe}")
+                try:
+                    os.startfile(startup_dir)
+                except Exception as e:
+                    print(f"Could not open file explorer: {e}")
+                
                 try:
                     ctypes.windll.user32.MessageBoxW(0, msg, "Deploy Error: STARTUP Folder Locked", 0x30)
                 except:
