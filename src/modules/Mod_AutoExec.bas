@@ -1,15 +1,25 @@
 Attribute VB_Name = "Mod_AutoExec"
 Public Sub AutoExec()
     ' This macro runs automatically when the global template loads.
-    ' It creates a native Word CommandBar (toolbar) that appears on the Add-Ins tab.
-    
+    ' To prevent startup race conditions where Word's UI is not yet fully initialized,
+    ' we delay the toolbar creation by 1 second.
+    Application.OnTime When:=Now + TimeValue("00:00:01"), Name:="Mod_AutoExec.CreateMWToolbar"
+End Sub
+
+Public Sub CreateMWToolbar()
     Dim cb As Object ' CommandBar
     Dim btn As Object ' CommandBarButton
+    
+    On Error GoTo ErrorHandler
+    
+    ' Set the customization context to this add-in template,
+    ' preventing issues if Normal.dotm is locked or busy.
+    CustomizationContext = ThisDocument
     
     ' 1. Delete the existing toolbar if it exists to prevent duplicates
     On Error Resume Next
     Application.CommandBars("MW Tools").Delete
-    On Error GoTo 0
+    On Error GoTo ErrorHandler
     
     ' 2. Create the new toolbar
     ' Position:=msoBarTop (1)
@@ -69,11 +79,17 @@ Public Sub AutoExec()
     
     ' 4. Make it visible
     cb.Visible = True
+    
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "MW Tools Add-In encountered an error while building the ribbon: " & Err.Description, vbCritical, "MW Tools Add-In Error"
 End Sub
 
 Public Sub AutoExit()
     ' Clean up when Word closes
     On Error Resume Next
+    CustomizationContext = ThisDocument
     Application.CommandBars("MW Tools").Delete
     On Error GoTo 0
 End Sub
