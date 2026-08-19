@@ -42,7 +42,7 @@ try {{
     }}
 
     # Create new part and write XML
-    $part = $package.CreatePart($uiUri, "application/xml")
+    $part = $package.CreatePart($uiUri, "application/vnd.ms-office.customui")
     $xmlContent = [System.IO.File]::ReadAllBytes($xmlPath)
     $stream = $part.GetStream()
     $stream.Write($xmlContent, 0, $xmlContent.Length)
