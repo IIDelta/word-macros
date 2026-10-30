@@ -31,6 +31,12 @@ End Sub
 Public Sub OnAction_ReopenComments(control As Object)
     Call Mod_Review.MW_ReopenAllComments
 End Sub
+
+' --- CSR Table Automation ---
+Public Sub OnAction_CSR_Insert_RTF_Table(control As Object)
+    Call Mod_CSR_Table.CSR_Insert_RTF_Table
+End Sub
+
 ' --- COMMANDBAR FALLBACKS ---
 ' CommandBar buttons cannot pass the IRibbonControl parameter.
 ' These subroutines take no arguments and call the underlying logic.
@@ -61,4 +67,8 @@ End Sub
 
 Public Sub OnAction_ReopenComments_Fallback()
     Call OnAction_ReopenComments(Nothing)
+End Sub
+
+Public Sub OnAction_CSR_Insert_RTF_Table_Fallback()
+    Call OnAction_CSR_Insert_RTF_Table(Nothing)
 End Sub

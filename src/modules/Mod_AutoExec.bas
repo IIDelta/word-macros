@@ -90,6 +90,14 @@ Public Sub CreateMWToolbar()
     btn.Style = 3
     btn.FaceId = 1589 ' Comments icon
     btn.OnAction = "Mod_RibbonCallbacks.OnAction_ReopenComments_Fallback"
+
+    ' Button 7: Insert CSR Table
+    Set btn = cb.Controls.Add(Type:=1)
+    btn.Caption = "Insert CSR Table"
+    btn.Style = 3
+    btn.FaceId = 499 ' Table icon
+    btn.OnAction = "Mod_RibbonCallbacks.OnAction_CSR_Insert_RTF_Table_Fallback"
+    btn.BeginGroup = True
     
     ' Make it visible
     cb.Visible = True
