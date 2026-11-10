@@ -45,6 +45,9 @@ Private Const CSR_INDENT_LEVEL_2_PTS As Single = 24# ' ~0.33" (Level 2: 4 spaces
 Private Const CSR_INDENT_LEVEL_3_PTS As Single = 36# ' ~0.50" (Level 3: 6 spaces or \li540)
 Private Const CSR_INDENT_LEVEL_4_PTS As Single = 48# ' ~0.67" (Level 4: 8+ spaces)
 
+' Session-persistent last used RTF folder for writer convenience
+Private mLastRTFFolder As String
+
 ' ==============================================================================
 ' PUBLIC ENTRY POINTS
 ' ==============================================================================
@@ -67,6 +70,8 @@ Public Sub ImportAndFormatCSRTable()
     Dim targetDoc As Document
     Dim stagingDoc As Document
     Dim targetRange As Range
+    Dim undoRec As Object
+    Dim undoStarted As Boolean
     
     Dim rawTableTitle As String
     Dim defaultCleanTitle As String
@@ -83,8 +88,10 @@ Public Sub ImportAndFormatCSRTable()
     Dim hfTitleBlock As String
     Dim hfFootnotes As Collection
     Dim tIdx As Long
+    Dim totalSrcTables As Long
     Dim srcTbl As Table
     
+    undoStarted = False
     On Error GoTo ErrorHandler
     
     If Documents.Count = 0 Then
@@ -93,7 +100,7 @@ Public Sub ImportAndFormatCSRTable()
     End If
     Set targetDoc = ActiveDocument
     
-    ' 1. Select RTF Output file
+    ' 1. Select RTF Output file (remembers last folder used in this Word session)
     Set fd = Application.FileDialog(1) ' 1 = msoFileDialogFilePicker
     With fd
         .Title = "Select SAS/R Clinical Table or Listing (RTF)"
@@ -102,12 +109,24 @@ Public Sub ImportAndFormatCSRTable()
         .Filters.Add "Word Documents (*.doc; *.docx)", "*.doc; *.docx"
         .Filters.Add "All Files (*.*)", "*.*"
         .AllowMultiSelect = False
+        If Len(mLastRTFFolder) > 0 Then
+            .InitialFileName = mLastRTFFolder
+        End If
         If .Show <> -1 Then Exit Sub
         rtfPath = .SelectedItems(1)
     End With
+    mLastRTFFolder = ExtractFolderPath(rtfPath)
+    
+    ' 1b. Pre-Flight Check before Word opens the RTF:
+    '     Reads the raw RTF header in <0.03s to detect massive files (e.g. lab shift / by-visit tables)
+    '     so the writer can see the table title, page count, and estimated scan time and cancel immediately.
+    If Not CheckRTFPreFlightBeforeOpen(rtfPath) Then
+        Exit Sub
+    End If
     
     Application.ScreenUpdating = False
     Application.DisplayAlerts = 0 ' wdAlertsNone
+    Application.StatusBar = "Takeda CSR Tools: Opening " & ExtractFileName(rtfPath) & "..."
     
     ' 2. Open RTF in hidden staging document
     Set stagingDoc = Documents.Open(FileName:=rtfPath, ConfirmConversions:=False, ReadOnly:=True, Visible:=False)
@@ -183,7 +202,12 @@ Public Sub ImportAndFormatCSRTable()
     Dim secSubgroups() As String
     PreScanSectionSubgroups stagingDoc, secSubgroups
     
-    For tIdx = 1 To stagingDoc.Tables.Count
+    totalSrcTables = stagingDoc.Tables.Count
+    For tIdx = 1 To totalSrcTables
+        If tIdx = 1 Or (tIdx Mod 5 = 0) Or tIdx = totalSrcTables Then
+            Application.StatusBar = "Takeda CSR Tools: Scanning RTF page " & tIdx & " of " & totalSrcTables & " (" & CLng((tIdx * 100) / totalSrcTables) & "%)..."
+            If tIdx Mod 10 = 0 Then DoEvents
+        End If
         Set srcTbl = stagingDoc.Tables(tIdx)
         
         If Not IsBannerTable(srcTbl) Then
@@ -445,6 +469,7 @@ Public Sub ImportAndFormatCSRTable()
     ' Close staging doc
     stagingDoc.Close SaveChanges:=0
     Set stagingDoc = Nothing
+    Application.StatusBar = False
     
     If parsedTablesColl.Count = 0 Then
         Application.ScreenUpdating = True
@@ -452,6 +477,12 @@ Public Sub ImportAndFormatCSRTable()
         MsgBox "No valid clinical data table rows could be parsed from the selected file.", vbExclamation, "Takeda CSR Tools"
         Exit Sub
     End If
+    
+    ' Record original row counts before any threshold filtering so the confirmation card can report reductions
+    Dim ptItem As Variant
+    For Each ptItem In parsedTablesColl
+        ptItem("OriginalRowCount") = ptItem("BodyRows").Count
+    Next ptItem
     
     ' 5. Prompt user if multiple distinct tables found (supports multi-select e.g. '5-8', 'Race', '2, 3, 4' or 'All')
     Dim tablesToInsert As Collection
@@ -471,11 +502,31 @@ Public Sub ImportAndFormatCSRTable()
     ' 5b. Check if any selected table is a long incidence/grade table (> 40 rows) and offer threshold filtering
     PromptAndFilterSelectedTables tablesToInsert
     
-    ' 6. Insert selected CSR tables into target document
+    ' 5c. Pre-Insertion Confirmation Step:
+    '     Displays the exact table title(s) to be inserted, data row count, estimated CSR page length,
+    '     orientation, and estimated insertion time, allowing the writer to Cancel before modifying the CSR.
+    If Not ConfirmTableInsertionWithUser(rtfPath, tablesToInsert, defaultSourceNumber) Then
+        Application.ScreenUpdating = True
+        Application.DisplayAlerts = -1
+        Application.StatusBar = False
+        Exit Sub
+    End If
+    
+    ' 6. Start a single custom Undo record so the writer can undo the entire insertion with one Ctrl+Z
+    On Error Resume Next
+    Set undoRec = Application.UndoRecord
+    If Not undoRec Is Nothing Then
+        undoRec.StartCustomRecord "Insert Takeda CSR Table"
+        undoStarted = True
+    End If
+    On Error GoTo ErrorHandler
+    
+    ' 7. Insert selected CSR tables into target document
     Set targetRange = Selection.Range
     Dim insTbl As Variant
     Dim lastTbl As Table
     Dim insertCount As Long: insertCount = 0
+    Dim totalToInsert As Long: totalToInsert = tablesToInsert.Count
     
     For Each insTbl In tablesToInsert
         If insertCount > 0 Then
@@ -485,6 +536,9 @@ Public Sub ImportAndFormatCSRTable()
             targetRange.Collapse 0 ' wdCollapseEnd
         End If
         
+        Application.StatusBar = "Takeda CSR Tools: Inserting table " & (insertCount + 1) & " of " & totalToInsert & " (" & insTbl("BodyRows").Count & " rows)..."
+        DoEvents
+        
         Set lastTbl = InsertSingleCSRTable(targetDoc, targetRange, insTbl, defaultSourceNumber, hfFootnotes)
         insertCount = insertCount + 1
         
@@ -492,6 +546,14 @@ Public Sub ImportAndFormatCSRTable()
         targetRange.Collapse 0 ' wdCollapseEnd
     Next insTbl
     
+    If undoStarted And Not undoRec Is Nothing Then
+        On Error Resume Next
+        undoRec.EndCustomRecord
+        undoStarted = False
+        On Error GoTo ErrorHandler
+    End If
+    
+    Application.StatusBar = False
     Application.ScreenUpdating = True
     Application.DisplayAlerts = -1
     
@@ -499,9 +561,11 @@ Public Sub ImportAndFormatCSRTable()
         Dim sTbl As Object: Set sTbl = tablesToInsert(1)
         MsgBox "Table imported and Takeda CSR formatting successfully applied!" & vbCrLf & _
                "Title: " & sTbl("FullTitle") & vbCrLf & _
-               "Columns: " & sTbl("ColCount") & " | Data Rows: " & sTbl("BodyRows").Count, vbInformation, "Takeda CSR Tools"
+               "Columns: " & sTbl("ColCount") & " | Data Rows: " & sTbl("BodyRows").Count & vbCrLf & _
+               "(Tip: Press Ctrl+Z once to undo the entire table insertion if needed.)", vbInformation, "Takeda CSR Tools"
     Else
-        MsgBox "Successfully imported and formatted " & insertCount & " CSR tables!", vbInformation, "Takeda CSR Tools"
+        MsgBox "Successfully imported and formatted " & insertCount & " CSR tables!" & vbCrLf & _
+               "(Tip: Press Ctrl+Z once to undo the entire table insertion if needed.)", vbInformation, "Takeda CSR Tools"
     End If
     Exit Sub
     
@@ -510,6 +574,11 @@ ErrorHandler:
         On Error Resume Next
         stagingDoc.Close SaveChanges:=0
     End If
+    If undoStarted And Not undoRec Is Nothing Then
+        On Error Resume Next
+        undoRec.EndCustomRecord
+    End If
+    Application.StatusBar = False
     Application.ScreenUpdating = True
     Application.DisplayAlerts = -1
     MsgBox "An error occurred during RTF import: " & Err.Description, vbCritical, "Takeda CSR Tools Error"
@@ -567,9 +636,16 @@ Private Function InsertSingleCSRTable( _
     
     ' Populate Body Rows
     Dim targetRowOffset As Long: targetRowOffset = 1 + numHeaderRows
+    Dim bodyRowIdx As Long: bodyRowIdx = 0
+    Dim totalBodyRows As Long: totalBodyRows = bodyRowsColl.Count
     Dim rItem As Variant, rVals As Variant
     For Each rItem In bodyRowsColl
+        bodyRowIdx = bodyRowIdx + 1
         targetRowOffset = targetRowOffset + 1
+        If bodyRowIdx Mod 25 = 0 Then
+            Application.StatusBar = "Takeda CSR Tools: Populating row " & bodyRowIdx & " of " & totalBodyRows & "..."
+            DoEvents
+        End If
         rVals = rItem(0)
         For cIdx = 1 To colCount
             finalTable.Rows(targetRowOffset).Cells(cIdx).Range.Text = rVals(cIdx)
@@ -602,7 +678,8 @@ Private Function InsertSingleCSRTable( _
     ApplyFootnoteStyle finalTable.Rows(footnoteRowIdx).Cells(1).Range
     
     ' Apply Full Takeda CSR Table Rules (Borders, Padding, AutoFit, Base Row Styles)
-    FormatCSRTableStructure finalTable, numHeaderRows:=numHeaderRows
+    ' Pass skipStubReformat:=True since rowData(1) was already formatted in sentence case during RTF extraction
+    FormatCSRTableStructure finalTable, numHeaderRows:=numHeaderRows, skipStubReformat:=True
     
     ' Re-apply Hierarchy Indentations & Styles to Column 1
     targetRowOffset = 1 + numHeaderRows
@@ -708,13 +785,32 @@ End Function
 
 Public Sub FormatCurrentSelectionAsCSRTable()
     Dim tbl As Table
+    Dim undoRec As Object
+    Dim undoStarted As Boolean
+    
     If Selection.Tables.Count = 0 Then
         MsgBox "Please place your cursor inside a table first.", vbExclamation, "Takeda CSR Tools"
         Exit Sub
     End If
     
+    undoStarted = False
+    On Error Resume Next
+    Set undoRec = Application.UndoRecord
+    If Not undoRec Is Nothing Then
+        undoRec.StartCustomRecord "Format Takeda CSR Table"
+        undoStarted = True
+    End If
+    On Error GoTo 0
+    
     Set tbl = Selection.Tables(1)
-    FormatCSRTableStructure tbl, numHeaderRows:=1
+    FormatCSRTableStructure tbl, numHeaderRows:=1, skipStubReformat:=False
+    
+    If undoStarted And Not undoRec Is Nothing Then
+        On Error Resume Next
+        undoRec.EndCustomRecord
+        On Error GoTo 0
+    End If
+    
     MsgBox "Takeda CSR formatting applied to selected table.", vbInformation, "Takeda CSR Tools"
 End Sub
 
@@ -897,7 +993,7 @@ End Sub
 ' TABLE FORMATTING & TAKEDA 3-LINE BORDER RULES
 ' ==============================================================================
 
-Public Sub FormatCSRTableStructure(ByVal tbl As Table, ByVal numHeaderRows As Long)
+Public Sub FormatCSRTableStructure(ByVal tbl As Table, ByVal numHeaderRows As Long, Optional ByVal skipStubReformat As Boolean = False)
     Dim totalRows As Long
     Dim rIdx As Long
     Dim footnoteRowIdx As Long
@@ -940,30 +1036,32 @@ Public Sub FormatCSRTableStructure(ByVal tbl As Table, ByVal numHeaderRows As Lo
     For rIdx = (2 + numHeaderRows) To (totalRows - 1)
         ApplyBodyRowStyle tbl.Rows(rIdx)
         
-        ' Format Row Stub Column 1 in Sentence Case if applicable (e.g. for pre-existing tables)
-        Dim stubCell As Cell
-        Set stubCell = tbl.Rows(rIdx).Cells(1)
-        Dim stubText As String
-        stubText = stubCell.Range.Text
-        If Len(stubText) >= 2 Then
-            ' Word cell text ends with Chr(13) & Chr(7)
-            stubText = Left(stubText, Len(stubText) - 2)
-            Dim formattedStub As String
-            formattedStub = FormatRowStubSentenceCase(stubText)
-            If formattedStub <> stubText Then
-                stubCell.Range.Text = formattedStub
+        If Not skipStubReformat Then
+            ' Format Row Stub Column 1 in Sentence Case if applicable (e.g. for pre-existing tables)
+            Dim stubCell As Cell
+            Set stubCell = tbl.Rows(rIdx).Cells(1)
+            Dim stubText As String
+            stubText = stubCell.Range.Text
+            If Len(stubText) >= 2 Then
+                ' Word cell text ends with Chr(13) & Chr(7)
+                stubText = Left(stubText, Len(stubText) - 2)
+                Dim formattedStub As String
+                formattedStub = FormatRowStubSentenceCase(stubText)
+                If formattedStub <> stubText Then
+                    stubCell.Range.Text = formattedStub
+                End If
             End If
-        End If
-        
-        ' Check if Column 1 has existing indent to apply Table:Indent style
-        On Error Resume Next
-        If stubCell.Range.ParagraphFormat.LeftIndent > 0 Then
-            If stubCell.Range.ParagraphFormat.LeftIndent <= CSR_INDENT_LEVEL_1_PTS Then
-                stubCell.Range.Style = "Table:Indent"
-                If Err.Number <> 0 Then Err.Clear
+            
+            ' Check if Column 1 has existing indent to apply Table:Indent style
+            On Error Resume Next
+            If stubCell.Range.ParagraphFormat.LeftIndent > 0 Then
+                If stubCell.Range.ParagraphFormat.LeftIndent <= CSR_INDENT_LEVEL_1_PTS Then
+                    stubCell.Range.Style = "Table:Indent"
+                    If Err.Number <> 0 Then Err.Clear
+                End If
             End If
+            On Error GoTo 0
         End If
-        On Error GoTo 0
     Next rIdx
     
     ' -------------------------------------------------------------------------
@@ -2956,5 +3054,476 @@ Private Sub UpdateFilteredTableTitle( _
     If Len(popT) > 0 Then fullT = fullT & " " & popT
     tblDict("FullTitle") = fullT
 End Sub
+
+' ==============================================================================
+' PRE-FLIGHT RAW RTF GUARD & PRE-INSERTION CONFIRMATION HELPERS
+' ==============================================================================
+
+Private Function ExtractFolderPath(ByVal fullPath As String) As String
+    Dim lastSep As Long
+    lastSep = InStrRev(fullPath, "\")
+    If lastSep = 0 Then lastSep = InStrRev(fullPath, "/")
+    If lastSep > 0 Then
+        ExtractFolderPath = Left(fullPath, lastSep)
+    Else
+        ExtractFolderPath = ""
+    End If
+End Function
+
+Private Function ExtractFileName(ByVal fullPath As String) As String
+    Dim lastSep As Long
+    lastSep = InStrRev(fullPath, "\")
+    If lastSep = 0 Then lastSep = InStrRev(fullPath, "/")
+    If lastSep > 0 Then
+        ExtractFileName = Mid(fullPath, lastSep + 1)
+    Else
+        ExtractFileName = fullPath
+    End If
+End Function
+
+Private Function CheckRTFPreFlightBeforeOpen(ByVal rtfPath As String) As Boolean
+    Dim fileBytes As Long
+    Dim estSourcePages As Long
+    Dim estRawRows As Long
+    Dim quickTitle As String
+    
+    CheckRTFPreFlightBeforeOpen = True
+    On Error Resume Next
+    
+    ' Only run raw RTF inspection on .rtf/.doc text streams (skip binary .docx zip archives)
+    If LCase(Right(rtfPath, 5)) = ".docx" Then
+        On Error GoTo 0
+        Exit Function
+    End If
+    
+    QuickInspectRTFFile rtfPath, fileBytes, estSourcePages, estRawRows, quickTitle
+    If Err.Number <> 0 Then
+        Err.Clear
+        On Error GoTo 0
+        Exit Function
+    End If
+    On Error GoTo 0
+    
+    ' Trigger the pre-open warning if the source RTF is large (>= 30 pages, >= 500 raw rows, or >= 750 KB)
+    If estSourcePages >= 30 Or estRawRows >= 500 Or fileBytes >= 768000 Then
+        Dim sizeStr As String
+        If fileBytes >= 1048576 Then
+            sizeStr = Format(CDbl(fileBytes) / 1048576#, "0.00") & " MB"
+        Else
+            sizeStr = CLng(fileBytes / 1024) & " KB"
+        End If
+        
+        Dim scanSecLow As Long
+        Dim scanSecHigh As Long
+        scanSecLow = CLng(estSourcePages * 0.1) + CLng(estRawRows * 0.002)
+        If scanSecLow < 2 Then scanSecLow = 2
+        scanSecHigh = CLng(scanSecLow * 1.6) + 2
+        
+        Dim warnMsg As String
+        warnMsg = "Large RTF file detected before opening in Word:" & vbCrLf & vbCrLf & _
+                  "File: " & ExtractFileName(rtfPath) & " (" & sizeStr & ")" & vbCrLf & _
+                  "Detected Table: " & quickTitle & vbCrLf & _
+                  "Source RTF Length: ~" & estSourcePages & " RTF pages (~" & estRawRows & " raw table rows)" & vbCrLf & _
+                  "Estimated Scan Time: " & FormatEstimatedSeconds(scanSecLow, scanSecHigh) & vbCrLf & vbCrLf & _
+                  "Note: If this table has multiple treatment/subgroup panels or is a long incidence table, " & _
+                  "you will be able to select specific panels or filter rows after scanning." & vbCrLf & _
+                  "If you selected the wrong file (e.g., a massive shift or by-visit table), click Cancel now to abort immediately." & vbCrLf & vbCrLf & _
+                  "Proceed with opening and scanning this file?"
+        
+        Dim resp As VbMsgBoxResult
+        resp = MsgBox(warnMsg, vbOKCancel + vbExclamation, "Large RTF File Detected - Confirm Scan")
+        If resp <> vbOK Then
+            CheckRTFPreFlightBeforeOpen = False
+        End If
+    End If
+End Function
+
+Private Sub QuickInspectRTFFile( _
+    ByVal rtfPath As String, _
+    ByRef outFileBytes As Long, _
+    ByRef outPages As Long, _
+    ByRef outRawRows As Long, _
+    ByRef outQuickTitle As String _
+)
+    Dim fNum As Integer
+    Dim headLen As Long
+    Dim headBuf As String
+    Dim scanLen As Long
+    Dim scanBuf As String
+    Dim sectdCount As Long
+    Dim pageCount As Long
+    
+    outFileBytes = 0
+    outPages = 1
+    outRawRows = 0
+    outQuickTitle = "Clinical Summary Table"
+    
+    On Error GoTo QuickCleanup
+    outFileBytes = FileLen(rtfPath)
+    If outFileBytes <= 0 Then Exit Sub
+    
+    fNum = FreeFile
+    Open rtfPath For Binary Access Read Shared As #fNum
+    
+    ' Read first 32 KB for instant title extraction
+    headLen = outFileBytes
+    If headLen > 32768 Then headLen = 32768
+    headBuf = Space$(headLen)
+    Get #fNum, 1, headBuf
+    outQuickTitle = ExtractQuickTitleFromRawRTF(headBuf)
+    
+    ' Read up to 8 MB in a single fast block to count \sectd and \row tokens
+    scanLen = outFileBytes
+    If scanLen > 8388608 Then scanLen = 8388608
+    If scanLen <= headLen Then
+        scanBuf = headBuf
+    Else
+        scanBuf = Space$(scanLen)
+        Get #fNum, 1, scanBuf
+    End If
+    Close #fNum
+    fNum = 0
+    
+    sectdCount = CountSubstringOccurrences(scanBuf, "\sectd")
+    pageCount = CountSubstringOccurrences(scanBuf, "\page")
+    If sectdCount >= pageCount And sectdCount > 0 Then
+        outPages = sectdCount
+    ElseIf pageCount > 0 Then
+        outPages = pageCount + 1
+    Else
+        outPages = 1
+    End If
+    
+    outRawRows = CountSubstringOccurrences(scanBuf, "\row")
+    
+    ' Scale estimate proportionally if file exceeds 8 MB
+    If outFileBytes > scanLen And scanLen > 0 Then
+        Dim scaleFactor As Double
+        scaleFactor = CDbl(outFileBytes) / CDbl(scanLen)
+        outPages = CLng(outPages * scaleFactor)
+        outRawRows = CLng(outRawRows * scaleFactor)
+    End If
+    Exit Sub
+    
+QuickCleanup:
+    If fNum <> 0 Then
+        On Error Resume Next
+        Close #fNum
+    End If
+End Sub
+
+Private Function CountSubstringOccurrences(ByRef haystack As String, ByVal needle As String) As Long
+    Dim cnt As Long
+    Dim pos As Long
+    Dim nLen As Long
+    
+    cnt = 0
+    nLen = Len(needle)
+    If nLen = 0 Or Len(haystack) = 0 Then
+        CountSubstringOccurrences = 0
+        Exit Function
+    End If
+    
+    pos = InStr(1, haystack, needle, vbBinaryCompare)
+    Do While pos > 0
+        cnt = cnt + 1
+        pos = InStr(pos + nLen, haystack, needle, vbBinaryCompare)
+    Loop
+    CountSubstringOccurrences = cnt
+End Function
+
+Private Function ExtractQuickTitleFromRawRTF(ByRef rawHead As String) As String
+    Dim pos As Long
+    Dim kw As Variant
+    Dim idx As Long
+    Dim p As Long
+    Dim nxtCh As String
+    
+    pos = 0
+    For Each kw In Array("Table ", "Listing ")
+        idx = 1
+        Do
+            p = InStr(idx, rawHead, CStr(kw), vbBinaryCompare)
+            If p = 0 Then Exit Do
+            If p + Len(CStr(kw)) <= Len(rawHead) Then
+                nxtCh = Mid$(rawHead, p + Len(CStr(kw)), 1)
+                If nxtCh >= "0" And nxtCh <= "9" Then
+                    If pos = 0 Or p < pos Then
+                        pos = p
+                    End If
+                    Exit Do
+                End If
+            End If
+            idx = p + Len(CStr(kw))
+        Loop
+    Next kw
+    
+    If pos = 0 Then
+        ExtractQuickTitleFromRawRTF = "Clinical Summary Table"
+        Exit Function
+    End If
+    
+    Dim endCellOrRow As Long
+    endCellOrRow = InStr(pos, rawHead, "\cell}", vbBinaryCompare)
+    Dim endBrace As Long
+    endBrace = InStr(pos, rawHead, "}", vbBinaryCompare)
+    
+    Dim firstEnd As Long
+    If endCellOrRow > 0 And endCellOrRow < pos + 600 Then
+        firstEnd = endCellOrRow
+    ElseIf endBrace > 0 And endBrace < pos + 600 Then
+        firstEnd = endBrace - 1
+    Else
+        firstEnd = pos + 300
+    End If
+    If firstEnd > Len(rawHead) Then firstEnd = Len(rawHead)
+    
+    Dim firstSeg As String
+    firstSeg = Mid$(rawHead, pos, firstEnd - pos + 1)
+    
+    If InStr(1, firstSeg, "\line", vbBinaryCompare) > 0 Then
+        ExtractQuickTitleFromRawRTF = StripRawRTFControls(firstSeg)
+        Exit Function
+    End If
+    
+    ' Multi-row header table (each title line is in its own {\cell} row)
+    Dim combined As String
+    combined = StripRawRTFControls(firstSeg)
+    
+    Dim scanPos As Long
+    scanPos = firstEnd + 1
+    Dim stepIdx As Long
+    For stepIdx = 1 To 3
+        Dim nextCell As Long
+        nextCell = InStr(scanPos, rawHead, "\cell}", vbBinaryCompare)
+        If nextCell = 0 Or (nextCell - scanPos) > 650 Then
+            Exit For
+        End If
+        Dim openB As Long
+        openB = InStrRev(rawHead, "{", nextCell, vbBinaryCompare)
+        If openB >= scanPos Then
+            Dim segTxt As String
+            segTxt = StripRawRTFControls(Mid$(rawHead, openB + 1, nextCell - openB - 1))
+            If Len(segTxt) > 0 And Left$(segTxt, 5) <> "Page " And Left$(segTxt, 8) <> "Takeda: " Then
+                combined = combined & " - " & segTxt
+            End If
+        End If
+        scanPos = nextCell + 6
+    Next stepIdx
+    
+    If Len(combined) = 0 Then combined = "Clinical Summary Table"
+    ExtractQuickTitleFromRawRTF = combined
+End Function
+
+Private Function StripRawRTFControls(ByVal s As String) As String
+    Dim work As String
+    Dim out As String
+    Dim i As Long
+    Dim n As Long
+    Dim ch As String
+    
+    work = Replace(s, "\line ", " - ")
+    work = Replace(work, "\line", " - ")
+    work = Replace(work, "\cell", "")
+    
+    out = ""
+    n = Len(work)
+    i = 1
+    Do While i <= n
+        ch = Mid$(work, i, 1)
+        If ch = "\" Then
+            i = i + 1
+            Do While i <= n
+                ch = Mid$(work, i, 1)
+                If (ch >= "a" And ch <= "z") Or (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9") Or ch = "-" Or ch = "*" Then
+                    i = i + 1
+                Else
+                    Exit Do
+                End If
+            Loop
+            If i <= n Then
+                If Mid$(work, i, 1) = " " Then i = i + 1
+            End If
+        ElseIf ch = "{" Or ch = "}" Or ch = vbCr Or ch = vbLf Then
+            i = i + 1
+        Else
+            out = out & ch
+            i = i + 1
+        End If
+    Loop
+    
+    out = Trim(out)
+    Do While InStr(out, "  ") > 0
+        out = Replace(out, "  ", " ")
+    Loop
+    StripRawRTFControls = out
+End Function
+
+Private Function ConfirmTableInsertionWithUser( _
+    ByVal rtfPath As String, _
+    ByVal tablesToInsert As Collection, _
+    ByVal defaultSourceNumber As String _
+) As Boolean
+    Dim tblCount As Long
+    Dim totalDataRows As Long
+    Dim totalOrigRows As Long
+    Dim totalCells As Long
+    Dim totalEstPages As Long
+    Dim anyLandscape As Boolean
+    Dim anyPortrait As Boolean
+    Dim firstTbl As Object
+    Dim tItem As Variant
+    Dim tObj As Object
+    
+    ConfirmTableInsertionWithUser = True
+    tblCount = tablesToInsert.Count
+    If tblCount = 0 Then
+        ConfirmTableInsertionWithUser = False
+        Exit Function
+    End If
+    
+    totalDataRows = 0
+    totalOrigRows = 0
+    totalCells = 0
+    totalEstPages = 0
+    anyLandscape = False
+    anyPortrait = False
+    
+    Set firstTbl = tablesToInsert(1)
+    For Each tItem In tablesToInsert
+        Set tObj = tItem
+        Dim rCnt As Long: rCnt = tObj("BodyRows").Count
+        Dim oCnt As Long: oCnt = rCnt
+        If tObj.Exists("OriginalRowCount") Then
+            oCnt = CLng(tObj("OriginalRowCount"))
+        End If
+        Dim cCnt As Long: cCnt = CLng(tObj("ColCount"))
+        Dim hCnt As Long: hCnt = CLng(tObj("NumHeaderRows"))
+        Dim wPts As Single: wPts = CSng(tObj("TotalWidthPts"))
+        Dim isLand As Boolean
+        isLand = (cCnt >= CSR_AUTO_LANDSCAPE_COL_THRESHOLD Or wPts > CSR_PORTRAIT_MAX_WIDTH_PTS)
+        If isLand Then
+            anyLandscape = True
+        Else
+            anyPortrait = True
+        End If
+        
+        totalDataRows = totalDataRows + rCnt
+        totalOrigRows = totalOrigRows + oCnt
+        totalCells = totalCells + ((rCnt + hCnt + 2) * cCnt)
+        totalEstPages = totalEstPages + EstimateCSROutputPages(rCnt, hCnt, isLand)
+    Next tItem
+    
+    Dim orientLabel As String
+    If anyLandscape And anyPortrait Then
+        orientLabel = "Mixed Landscape & Portrait"
+    ElseIf anyLandscape Then
+        orientLabel = "Landscape"
+    Else
+        orientLabel = "Portrait"
+    End If
+    
+    Dim srcNum As String
+    srcNum = CStr(firstTbl("SourceNumber"))
+    If Len(srcNum) = 0 Then srcNum = defaultSourceNumber
+    If Len(srcNum) = 0 Then srcNum = "N/A"
+    
+    Dim titleSummary As String
+    If tblCount = 1 Then
+        titleSummary = CStr(firstTbl("FullTitle"))
+    Else
+        titleSummary = CStr(firstTbl("Title"))
+        If Len(CStr(firstTbl("Population"))) > 0 Then
+            If InStr(1, titleSummary, CStr(firstTbl("Population")), vbTextCompare) = 0 Then
+                titleSummary = titleSummary & " " & CStr(firstTbl("Population"))
+            End If
+        End If
+        
+        Dim panelPreview As String: panelPreview = ""
+        Dim pIdx As Long
+        Dim maxPreview As Long: maxPreview = tblCount
+        If maxPreview > 4 Then maxPreview = 4
+        For pIdx = 1 To maxPreview
+            Set tObj = tablesToInsert(pIdx)
+            Dim subName As String: subName = Trim(CStr(tObj("Subtitle")))
+            If Len(subName) = 0 Then subName = "Panel " & pIdx
+            If pIdx > 1 Then panelPreview = panelPreview & "; "
+            panelPreview = panelPreview & subName & " (" & tObj("BodyRows").Count & " rows)"
+        Next pIdx
+        If tblCount > 4 Then
+            panelPreview = panelPreview & "; ... (+" & (tblCount - 4) & " more)"
+        End If
+        titleSummary = titleSummary & vbCrLf & "Selected Panels (" & tblCount & "): " & panelPreview
+    End If
+    
+    Dim rowsSummary As String
+    If totalOrigRows > totalDataRows Then
+        rowsSummary = totalDataRows & " data rows (filtered down from " & totalOrigRows & " original rows) x " & firstTbl("ColCount") & " columns"
+    Else
+        rowsSummary = totalDataRows & " data rows x " & firstTbl("ColCount") & " columns"
+    End If
+    
+    ' Estimate insertion & formatting duration in Word
+    Dim estSecLow As Long
+    Dim estSecHigh As Long
+    estSecLow = CLng(totalCells * 0.0025) + CLng(tblCount * 0.4)
+    If estSecLow < 1 Then estSecLow = 1
+    estSecHigh = CLng(estSecLow * 1.6) + 1
+    
+    Dim msg As String
+    msg = "Ready to insert into CSR document:" & vbCrLf & vbCrLf & _
+          "File: " & ExtractFileName(rtfPath) & vbCrLf & _
+          "Source: " & srcNum & vbCrLf & _
+          "Title: " & titleSummary & vbCrLf & vbCrLf & _
+          "Table Size: " & rowsSummary & vbCrLf & _
+          "Estimated CSR Length: ~" & totalEstPages & " page(s) (" & orientLabel & ")" & vbCrLf & _
+          "Estimated Insertion Time: " & FormatEstimatedSeconds(estSecLow, estSecHigh)
+    
+    Dim boxStyle As VbMsgBoxStyle
+    If totalDataRows >= 150 Or totalEstPages >= 6 Then
+        msg = msg & vbCrLf & vbCrLf & _
+              "WARNING: This insertion will add ~" & totalEstPages & " pages (" & totalDataRows & " rows) to your CSR document."
+        boxStyle = vbOKCancel + vbExclamation
+    Else
+        boxStyle = vbOKCancel + vbInformation
+    End If
+    
+    msg = msg & vbCrLf & vbCrLf & "Click OK to insert into the CSR, or Cancel to abort."
+    
+    Dim choice As VbMsgBoxResult
+    choice = MsgBox(msg, boxStyle, "Confirm CSR Table Insertion")
+    If choice <> vbOK Then
+        ConfirmTableInsertionWithUser = False
+    End If
+End Function
+
+Private Function EstimateCSROutputPages(ByVal dataRows As Long, ByVal headerRows As Long, ByVal isLandscape As Boolean) As Long
+    Dim rowsPerPage As Long
+    If isLandscape Then
+        rowsPerPage = 26 - headerRows
+    Else
+        rowsPerPage = 38 - headerRows
+    End If
+    If rowsPerPage < 12 Then rowsPerPage = 12
+    
+    Dim pages As Long
+    pages = CLng((dataRows + 3 + rowsPerPage - 1) \ rowsPerPage)
+    If pages < 1 Then pages = 1
+    EstimateCSROutputPages = pages
+End Function
+
+Private Function FormatEstimatedSeconds(ByVal secLow As Long, ByVal secHigh As Long) As String
+    If secHigh <= 2 Then
+        FormatEstimatedSeconds = "< 2 seconds"
+    ElseIf secHigh < 60 Then
+        FormatEstimatedSeconds = "~" & secLow & "-" & secHigh & " seconds"
+    Else
+        Dim minLow As Long: minLow = secLow \ 60
+        Dim minHigh As Long: minHigh = (secHigh + 59) \ 60
+        If minLow < 1 Then minLow = 1
+        FormatEstimatedSeconds = "~" & minLow & "-" & minHigh & " minute(s)"
+    End If
+End Function
+
 
 
