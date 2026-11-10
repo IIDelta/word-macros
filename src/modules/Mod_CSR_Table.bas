@@ -67,38 +67,23 @@ Public Sub ImportAndFormatCSRTable()
     Dim targetDoc As Document
     Dim stagingDoc As Document
     Dim targetRange As Range
-    Dim finalTable As Table
-    
-    Dim requiresLandscape As Boolean
-    Dim colCount As Long
-    Dim totalWidthPts As Single
     
     Dim rawTableTitle As String
-    Dim cleanTitleText As String
-    Dim sourceNumber As String
-    Dim distinctFootnotes As Collection
-    Dim bylinesColl As Collection
-    Dim populationName As String
-    
-    Dim tIdx As Long
-    Dim srcTbl As Table
-    Dim rIdx As Long
-    Dim cIdx As Long
-    Dim cellText As String
-    Dim cleanCellText As String
-    Dim cIndent As Single
-    
-    Dim numHeaderRows As Long
-    Dim headerValues() As String
-    Dim bodyRowsColl As Collection
-    Dim rowData() As String
-    Dim rowIndents() As Single
-    Dim isSpacerRow As Boolean
+    Dim defaultCleanTitle As String
+    Dim defaultSourceNumber As String
+    Dim defaultPopulation As String
     
     Dim p As Paragraph
     Dim pText As String
-    Dim fnItem As Variant
-    Dim combinedFootnotes As String
+    Dim rawPText As String
+    Dim bylinesColl As Collection
+    
+    Dim parsedTablesColl As Collection
+    Dim activeTable As Object
+    Dim hfTitleBlock As String
+    Dim hfFootnotes As Collection
+    Dim tIdx As Long
+    Dim srcTbl As Table
     
     On Error GoTo ErrorHandler
     
@@ -114,6 +99,7 @@ Public Sub ImportAndFormatCSRTable()
         .Title = "Select SAS/R Clinical Table or Listing (RTF)"
         .Filters.Clear
         .Filters.Add "Rich Text Format (*.rtf)", "*.rtf"
+        .Filters.Add "Word Documents (*.doc; *.docx)", "*.doc; *.docx"
         .Filters.Add "All Files (*.*)", "*.*"
         .AllowMultiSelect = False
         If .Show <> -1 Then Exit Sub
@@ -126,39 +112,44 @@ Public Sub ImportAndFormatCSRTable()
     ' 2. Open RTF in hidden staging document
     Set stagingDoc = Documents.Open(FileName:=rtfPath, ConfirmConversions:=False, ReadOnly:=True, Visible:=False)
     
-    ' 3. Parse Metadata (Title, Source Number, Bylines, Footnotes)
-    Set distinctFootnotes = New Collection
+    ' 3. Parse Metadata (Title, Source Number, Bylines)
     Set bylinesColl = New Collection
     rawTableTitle = ""
-    sourceNumber = ""
-    populationName = ""
+    defaultSourceNumber = ""
+    defaultPopulation = ""
     
     For Each p In stagingDoc.Paragraphs
-        Dim rawPText As String
         rawPText = p.Range.Text
         pText = Trim(CleanParagraphString(rawPText))
         If Len(pText) > 0 Then
             If (InStr(1, pText, "Table ", vbTextCompare) = 1 Or InStr(1, pText, "Listing ", vbTextCompare) = 1) And Len(rawTableTitle) = 0 Then
                 rawTableTitle = pText
-                sourceNumber = ExtractSourceNumber(pText)
-                cleanTitleText = ExtractCleanTitleWithPopulation(rawPText, populationName)
+                defaultSourceNumber = ExtractSourceNumber(pText)
+                defaultCleanTitle = ExtractCleanTitleWithPopulation(rawPText, defaultPopulation)
             ElseIf InStr(1, pText, "Treatment Group:", vbTextCompare) > 0 Or InStr(1, pText, "Population:", vbTextCompare) > 0 Then
                 If Not CollectionContains(bylinesColl, pText) Then
-                    bylinesColl.Add pText, pText
-                End If
-            ElseIf IsFootnoteParagraph(pText) Then
-                If Not CollectionContains(distinctFootnotes, pText) Then
-                    distinctFootnotes.Add pText, pText
+                    bylinesColl.Add pText
                 End If
             End If
         End If
     Next p
     
-    If Len(cleanTitleText) = 0 Then
+    ' 3b. Many SAS ODS RTF outputs place titles/footnotes in the page header/footer
+    '     (BODYTITLE off) rather than in the document body. Scan those stories too.
+    Set hfFootnotes = New Collection
+    hfTitleBlock = ""
+    ScanHeaderFooterMetadata stagingDoc, hfTitleBlock, hfFootnotes
+    If Len(rawTableTitle) = 0 And Len(hfTitleBlock) > 0 Then
+        rawTableTitle = CleanParagraphString(hfTitleBlock)
+        defaultSourceNumber = ExtractSourceNumber(hfTitleBlock)
+        defaultCleanTitle = ExtractCleanTitleWithPopulation(hfTitleBlock, defaultPopulation)
+    End If
+    
+    If Len(defaultCleanTitle) = 0 Then
         If Len(rawTableTitle) > 0 Then
-            cleanTitleText = rawTableTitle
+            defaultCleanTitle = rawTableTitle
         Else
-            cleanTitleText = "Clinical Summary Table"
+            defaultCleanTitle = "Clinical Summary Table"
         End If
     End If
     
@@ -169,234 +160,351 @@ Public Sub ImportAndFormatCSRTable()
             Dim bStr As String
             bStr = CStr(bLine)
             If InStr(1, bStr, "Population:", vbTextCompare) > 0 Then
-                If Len(populationName) = 0 Then
+                If Len(defaultPopulation) = 0 Then
                     Dim byPop As String
                     byPop = Trim(Mid(bStr, InStr(1, bStr, "Population:", vbTextCompare) + 11))
                     Do While Left(byPop, 1) = "(" And Right(byPop, 1) = ")"
                         byPop = Trim(Mid(byPop, 2, Len(byPop) - 2))
                     Loop
                     If Len(byPop) > 0 Then
-                        populationName = "(" & byPop & ")"
-                        cleanTitleText = cleanTitleText & " " & populationName
+                        defaultPopulation = "(" & byPop & ")"
                     End If
                 End If
             Else
-                cleanTitleText = cleanTitleText & " (" & bStr & ")"
+                defaultCleanTitle = defaultCleanTitle & " (" & bStr & ")"
             End If
         Next bLine
     End If
     
-    ' Parse Tables across pages (Multi-Page SAS ODS Stitching)
-    Set bodyRowsColl = New Collection
-    colCount = 0
-    numHeaderRows = 0
+    ' 4. Parse Tables across pages (detecting distinct tables vs multi-page continuation)
+    Set parsedTablesColl = New Collection
+    Set activeTable = Nothing
+    
+    Dim secSubgroups() As String
+    PreScanSectionSubgroups stagingDoc, secSubgroups
     
     For tIdx = 1 To stagingDoc.Tables.Count
         Set srcTbl = stagingDoc.Tables(tIdx)
         
-        ' Filter out 2-cell SAS Header/Footer Banners
         If Not IsBannerTable(srcTbl) Then
-            ' First clinical table defines structure
-            If colCount = 0 Then
-                colCount = srcTbl.Columns.Count
-                CalculateTableDimensions srcTbl, colCount, totalWidthPts
-                
-                ' Determine header rows (trhdr)
-                numHeaderRows = 0
-                For rIdx = 1 To srcTbl.Rows.Count
-                    If srcTbl.Rows(rIdx).HeadingFormat Then
-                        numHeaderRows = numHeaderRows + 1
-                    Else
-                        Exit For
-                    End If
-                Next rIdx
-                If numHeaderRows = 0 Then numHeaderRows = 1
-                
-                ReDim headerValues(1 To numHeaderRows, 1 To colCount)
-                For rIdx = 1 To numHeaderRows
-                    For cIdx = 1 To colCount
-                        On Error Resume Next
-                        cellText = srcTbl.Cell(rIdx, cIdx).Range.Text
-                        headerValues(rIdx, cIdx) = CleanHeaderCellString(cellText)
-                        On Error GoTo ErrorHandler
-                    Next cIdx
-                Next rIdx
+            Dim tableTitleInRow1 As Boolean
+            Dim thisSubtitle As String
+            Dim thisSourceNumber As String
+            Dim thisBaseTitle As String
+            Dim thisPop As String
+            Dim headerStartRow As Long
+            Dim thisNumHeaderRows As Long
+            Dim thisColCount As Long
+            Dim r As Long, c As Long
+            
+            tableTitleInRow1 = False
+            thisSubtitle = ""
+            thisSourceNumber = defaultSourceNumber
+            thisBaseTitle = defaultCleanTitle
+            thisPop = defaultPopulation
+            
+            ' Check preceding paragraph for table title
+            Dim precTitle As String
+            precTitle = GetPrecedingTableTitle(srcTbl)
+            If Len(precTitle) > 0 Then
+                thisSourceNumber = ExtractSourceNumber(precTitle)
+                thisBaseTitle = ExtractCleanTitleWithPopulation(precTitle, thisPop)
             End If
             
-            ' Extract body rows (skipping 1-cell spacer rows)
-            For rIdx = (numHeaderRows + 1) To srcTbl.Rows.Count
-                isSpacerRow = False
-                If srcTbl.Rows(rIdx).Cells.Count = 1 Then
-                    isSpacerRow = True
-                Else
-                    Dim allBlank As Boolean: allBlank = True
-                    For cIdx = 1 To srcTbl.Rows(rIdx).Cells.Count
-                        cleanCellText = CleanCellString(srcTbl.Rows(rIdx).Cells(cIdx).Range.Text)
-                        If Len(cleanCellText) > 0 And cleanCellText <> "~" Then
-                            allBlank = False
-                            Exit For
+            ' Check if Row 1 has table title / subtitle
+            If srcTbl.Rows.Count >= 2 Then
+                Dim firstCellText As String
+                firstCellText = CleanParagraphString(srcTbl.Rows(1).Cells(1).Range.Text)
+                If InStr(1, firstCellText, "Table ", vbTextCompare) = 1 Or _
+                   InStr(1, firstCellText, "Listing ", vbTextCompare) = 1 Then
+                    If srcTbl.Rows(2).HeadingFormat Then
+                        tableTitleInRow1 = True
+                        thisSourceNumber = ExtractSourceNumber(firstCellText)
+                        thisBaseTitle = ExtractCleanTitleWithPopulation(firstCellText, thisPop)
+                        If srcTbl.Rows(1).Cells.Count >= 2 Then
+                            thisSubtitle = CleanParagraphString(srcTbl.Rows(1).Cells(2).Range.Text)
                         End If
-                    Next cIdx
-                    If allBlank Then isSpacerRow = True
+                    End If
+                ElseIf srcTbl.Rows(1).Cells.Count = 2 And Len(firstCellText) = 0 Then
+                    ' Cell 1 is blank, Cell 2 might be subtitle (spanner BY-group)
+                    Dim cell2Text As String
+                    cell2Text = CleanParagraphString(srcTbl.Rows(1).Cells(2).Range.Text)
+                    If Len(cell2Text) > 0 And srcTbl.Rows(2).HeadingFormat Then
+                        tableTitleInRow1 = True
+                        thisSubtitle = cell2Text
+                    End If
+                End If
+            End If
+            
+            If tableTitleInRow1 Then
+                headerStartRow = 2
+            Else
+                headerStartRow = 1
+            End If
+            
+            ' Check section header for BY-group subtitle (e.g. Treatment: Placebo (N=258))
+            If Len(thisSubtitle) = 0 Then
+                On Error Resume Next
+                Dim tblSecIdx As Long: tblSecIdx = srcTbl.Range.Sections(1).Index
+                If tblSecIdx >= LBound(secSubgroups) And tblSecIdx <= UBound(secSubgroups) Then
+                    thisSubtitle = secSubgroups(tblSecIdx)
+                End If
+                On Error GoTo ErrorHandler
+            End If
+            
+            ' Count header rows
+            thisNumHeaderRows = 0
+            For r = headerStartRow To srcTbl.Rows.Count
+                If srcTbl.Rows(r).HeadingFormat Then
+                    thisNumHeaderRows = thisNumHeaderRows + 1
+                Else
+                    Exit For
+                End If
+            Next r
+            If thisNumHeaderRows = 0 Then thisNumHeaderRows = 1
+            
+            ' Determine column count from the last header row or table columns
+            Dim lastHdrRowIdx As Long
+            lastHdrRowIdx = headerStartRow + thisNumHeaderRows - 1
+            thisColCount = srcTbl.Rows(lastHdrRowIdx).Cells.Count
+            If thisColCount < srcTbl.Columns.Count Then
+                thisColCount = srcTbl.Columns.Count
+            End If
+            
+            ' Check continuation vs new distinct table
+            Dim isContinuation As Boolean: isContinuation = False
+            If Not activeTable Is Nothing Then
+                If activeTable("ColCount") = thisColCount And activeTable("Subtitle") = thisSubtitle Then
+                    isContinuation = True
+                End If
+            End If
+            
+            If Not isContinuation Then
+                If Not activeTable Is Nothing Then
+                    parsedTablesColl.Add activeTable
+                    Set activeTable = Nothing
                 End If
                 
-                If Not isSpacerRow Then
-                    ReDim rowData(1 To colCount)
-                    ReDim rowIndents(1 To colCount)
+                ' Initialize new activeTable dictionary
+                Set activeTable = CreateObject("Scripting.Dictionary")
+                activeTable("TableIndex") = parsedTablesColl.Count + 1
+                activeTable("SourceNumber") = thisSourceNumber
+                activeTable("Title") = thisBaseTitle
+                activeTable("Subtitle") = thisSubtitle
+                activeTable("Population") = thisPop
+                
+                Dim fullT As String: fullT = Trim(thisBaseTitle)
+                If Len(thisPop) > 0 Then
+                    If Right(fullT, Len(thisPop)) = thisPop Then
+                        fullT = Trim(Left(fullT, Len(fullT) - Len(thisPop)))
+                    End If
+                End If
+                If Len(thisSubtitle) > 0 Then fullT = fullT & " - " & thisSubtitle
+                If Len(thisPop) > 0 Then fullT = fullT & " " & thisPop
+                activeTable("FullTitle") = fullT
+                
+                activeTable("ColCount") = thisColCount
+                activeTable("NumHeaderRows") = thisNumHeaderRows
+                Set activeTable("BodyRows") = New Collection
+                Set activeTable("Footnotes") = New Collection
+                
+                Dim outWidthPts As Single
+                CalculateTableDimensions srcTbl, thisColCount, outWidthPts
+                activeTable("TotalWidthPts") = outWidthPts
+                
+                ' Extract column widths from last header row
+                Dim colWidths() As Single
+                ReDim colWidths(1 To thisColCount)
+                Dim cWTotal As Single: cWTotal = 0#
+                For c = 1 To thisColCount
+                    If c <= srcTbl.Rows(lastHdrRowIdx).Cells.Count Then
+                        colWidths(c) = srcTbl.Rows(lastHdrRowIdx).Cells(c).Width
+                    Else
+                        colWidths(c) = 50#
+                    End If
+                    cWTotal = cWTotal + colWidths(c)
+                Next c
+                
+                ' Extract header values (mapping merged spanners)
+                Dim hVals() As String
+                ReDim hVals(1 To thisNumHeaderRows, 1 To thisColCount)
+                For r = 1 To thisNumHeaderRows
+                    Dim actualRIdx As Long: actualRIdx = headerStartRow + r - 1
+                    Dim rCellsCount As Long: rCellsCount = srcTbl.Rows(actualRIdx).Cells.Count
                     
-                    For cIdx = 1 To colCount
-                        On Error Resume Next
-                        cellText = srcTbl.Rows(rIdx).Cells(cIdx).Range.Text
-                        Dim rawIndentPts As Single
-                        rawIndentPts = srcTbl.Rows(rIdx).Cells(cIdx).Range.ParagraphFormat.LeftIndent
+                    If rCellsCount = thisColCount Then
+                        For c = 1 To thisColCount
+                            Dim cTxt As String: cTxt = ""
+                            On Error Resume Next
+                            cTxt = srcTbl.Rows(actualRIdx).Cells(c).Range.Text
+                            On Error GoTo ErrorHandler
+                            hVals(r, c) = CleanHeaderCellString(cTxt)
+                        Next c
+                    Else
+                        ' Row has merged cells (spanners)
+                        Dim cumW As Single: cumW = 0#
+                        Dim cMap As Long: cMap = 1
+                        Dim kCell As Long
+                        For kCell = 1 To rCellsCount
+                            Dim cellW As Single
+                            cellW = srcTbl.Rows(actualRIdx).Cells(kCell).Width
+                            Dim sTxt As String
+                            sTxt = CleanHeaderCellString(srcTbl.Rows(actualRIdx).Cells(kCell).Range.Text)
+                            Dim spanEnd As Long
+                            spanEnd = FindColumnSpanEnd(colWidths, thisColCount, cumW + cellW)
+                            If spanEnd < cMap Then spanEnd = cMap
+                            Dim fillC As Long
+                            For fillC = cMap To spanEnd
+                                If fillC <= thisColCount Then hVals(r, fillC) = sTxt
+                            Next fillC
+                            cumW = cumW + cellW
+                            cMap = spanEnd + 1
+                        Next kCell
+                    End If
+                Next r
+                activeTable("HeaderValues") = hVals
+            End If
+            
+            ' Extract body rows and footnote rows from srcTbl
+            Dim bodyStartRow As Long
+            bodyStartRow = headerStartRow + thisNumHeaderRows
+            Dim rIdx As Long
+            For rIdx = bodyStartRow To srcTbl.Rows.Count
+                Dim isFootnoteRow As Boolean: isFootnoteRow = False
+                Dim isSpacerRow As Boolean: isSpacerRow = False
+                Dim rCells As Long: rCells = srcTbl.Rows(rIdx).Cells.Count
+                
+                If rCells = 1 Then
+                    isSpacerRow = True
+                    Dim singleText As String
+                    singleText = srcTbl.Rows(rIdx).Cells(1).Range.Text
+                    If IsFootnoteParagraph(singleText) Then
+                        AddFootnotesFromText activeTable("Footnotes"), singleText
+                    End If
+                Else
+                    Dim firstText As String
+                    firstText = srcTbl.Rows(rIdx).Cells(1).Range.Text
+                    If IsFootnoteParagraph(firstText) Then
+                        isFootnoteRow = True
+                        AddFootnotesFromText activeTable("Footnotes"), firstText
+                    Else
+                        Dim allBlank As Boolean: allBlank = True
+                        For c = 1 To rCells
+                            Dim clText As String
+                            clText = CleanCellString(srcTbl.Rows(rIdx).Cells(c).Range.Text)
+                            If Len(clText) > 0 And clText <> "~" Then
+                                allBlank = False
+                                Exit For
+                            End If
+                        Next c
+                        If allBlank Then isSpacerRow = True
+                    End If
+                End If
+                
+                If Not isSpacerRow And Not isFootnoteRow Then
+                    Dim rowData() As String
+                    Dim rowIndents() As Single
+                    ReDim rowData(1 To thisColCount)
+                    ReDim rowIndents(1 To thisColCount)
+                    
+                    For c = 1 To thisColCount
+                        Dim cellText As String: cellText = ""
+                        Dim rawIndentPts As Single: rawIndentPts = 0#
                         
-                        ' Calculate true hierarchy indentation points (for column 1 stubs)
-                        If cIdx = 1 Then
-                            cIndent = DetermineIndentPoints(rawIndentPts, cellText)
-                            rowData(1) = FormatRowStubSentenceCase(CleanCellString(cellText))
-                        Else
-                            cIndent = 0#
-                            rowData(cIdx) = CleanCellString(cellText)
+                        If c <= rCells Then
+                            On Error Resume Next
+                            cellText = srcTbl.Rows(rIdx).Cells(c).Range.Text
+                            rawIndentPts = srcTbl.Rows(rIdx).Cells(c).Range.ParagraphFormat.LeftIndent
+                            On Error GoTo ErrorHandler
                         End If
                         
-                        rowIndents(cIdx) = cIndent
-                        On Error GoTo ErrorHandler
-                    Next cIdx
+                        If c = 1 Then
+                            Dim cIndent As Single
+                            cIndent = DetermineIndentPoints(rawIndentPts, cellText)
+                            rowData(1) = FormatRowStubSentenceCase(CleanCellString(cellText))
+                            rowIndents(1) = cIndent
+                        Else
+                            rowData(c) = CleanCellString(cellText)
+                            rowIndents(c) = 0#
+                        End If
+                    Next c
                     
-                    bodyRowsColl.Add Array(rowData, rowIndents)
+                    If Not IsContinuationStubRow(rowData, thisColCount) Then
+                        activeTable("BodyRows").Add Array(rowData, rowIndents)
+                    End If
                 End If
             Next rIdx
         End If
     Next tIdx
     
-    ' Close staging document
+    If Not activeTable Is Nothing Then
+        parsedTablesColl.Add activeTable
+        Set activeTable = Nothing
+    End If
+    
+    ' Close staging doc
     stagingDoc.Close SaveChanges:=0
     Set stagingDoc = Nothing
     
-    If colCount = 0 Or bodyRowsColl.Count = 0 Then
+    If parsedTablesColl.Count = 0 Then
         Application.ScreenUpdating = True
         Application.DisplayAlerts = -1
         MsgBox "No valid clinical data table rows could be parsed from the selected file.", vbExclamation, "Takeda CSR Tools"
         Exit Sub
     End If
     
-    ' 4. Determine orientation (Rulebook § 6 / Section 1)
-    If colCount >= CSR_AUTO_LANDSCAPE_COL_THRESHOLD Or totalWidthPts > CSR_PORTRAIT_MAX_WIDTH_PTS Then
-        requiresLandscape = True
+    ' 5. Prompt user if multiple distinct tables found (supports multi-select e.g. '5-8', 'Race', '2, 3, 4' or 'All')
+    Dim tablesToInsert As Collection
+    Set tablesToInsert = New Collection
+    
+    If parsedTablesColl.Count = 1 Then
+        tablesToInsert.Add parsedTablesColl(1)
     Else
-        requiresLandscape = False
-    End If
-    
-    ' 5. Prepare Target Insertion Point
-    targetDoc.Activate
-    Set targetRange = Selection.Range
-    
-    ' Open Landscape Section if required
-    If requiresLandscape Then
-        InsertLandscapeSection targetRange
-    End If
-    
-    ' 6. Construct the Unified Takeda CSR Table
-    Dim totalTargetRows As Long
-    totalTargetRows = 1 + numHeaderRows + bodyRowsColl.Count + 1 ' Title + Headers + Body + Footnote Row
-    
-    Set finalTable = targetDoc.Tables.Add(Range:=targetRange, NumRows:=totalTargetRows, NumColumns:=colCount)
-    
-    ' Populate Row 1: Title with Proper Cross-Referenceable Field Codes
-    If colCount > 1 Then
-        finalTable.Rows(1).Cells.Merge
-    End If
-    InsertCrossReferencedTitle finalTable.Cell(1, 1).Range, cleanTitleText
-    
-    ' Populate Header Rows
-    For rIdx = 1 To numHeaderRows
-        For cIdx = 1 To colCount
-            finalTable.Cell(1 + rIdx, cIdx).Range.Text = headerValues(rIdx, cIdx)
-        Next cIdx
-        ApplyHeaderRowStyle finalTable.Rows(1 + rIdx)
-    Next rIdx
-    
-    ' Populate Body Rows (Text only in this pass)
-    Dim targetRowOffset As Long: targetRowOffset = 1 + numHeaderRows
-    Dim rItem As Variant
-    Dim rVals As Variant
-    Dim rInds As Variant
-    
-    For Each rItem In bodyRowsColl
-        targetRowOffset = targetRowOffset + 1
-        rVals = rItem(0)
-        
-        For cIdx = 1 To colCount
-            finalTable.Cell(targetRowOffset, cIdx).Range.Text = rVals(cIdx)
-        Next cIdx
-    Next rItem
-    
-    ' Populate Final Row: Footnotes (Merged across all columns)
-    Dim footnoteRowIdx As Long: footnoteRowIdx = totalTargetRows
-    If colCount > 1 Then
-        finalTable.Rows(footnoteRowIdx).Cells.Merge
-    End If
-    
-    ' Build combined footnote text starting with clean Source: line
-    combinedFootnotes = "Source: " & sourceNumber & "." & vbCrLf
-    For Each fnItem In distinctFootnotes
-        combinedFootnotes = combinedFootnotes & CStr(fnItem) & vbCrLf
-    Next fnItem
-    
-    ' Strip trailing carriage returns or line feeds to prevent empty trailing paragraph
-    Do While Right(combinedFootnotes, 1) = vbCr Or Right(combinedFootnotes, 1) = vbLf Or Right(combinedFootnotes, 1) = " "
-        combinedFootnotes = Left(combinedFootnotes, Len(combinedFootnotes) - 1)
-    Loop
-    
-    finalTable.Cell(footnoteRowIdx, 1).Range.Text = combinedFootnotes
-    ApplyFootnoteStyle finalTable.Cell(footnoteRowIdx, 1).Range
-    
-    ' 7. Apply Full Takeda CSR Table Rules (Borders, Padding, AutoFit, Base Row Styles)
-    FormatCSRTableStructure finalTable, numHeaderRows:=numHeaderRows
-    
-    ' 7b. CRITICAL: Re-apply Hierarchy Indentations & Styles to Column 1
-    targetRowOffset = 1 + numHeaderRows
-    For Each rItem In bodyRowsColl
-        targetRowOffset = targetRowOffset + 1
-        rInds = rItem(1)
-        Dim indVal As Single: indVal = CSng(rInds(1))
-        If indVal > 0 Then
-            If indVal <= CSR_INDENT_LEVEL_1_PTS Then
-                ' First level indent: Apply Table:Indent style
-                On Error Resume Next
-                finalTable.Cell(targetRowOffset, 1).Range.Style = "Table:Indent"
-                If Err.Number <> 0 Then
-                    Err.Clear
-                    finalTable.Cell(targetRowOffset, 1).Range.ParagraphFormat.LeftIndent = CSR_INDENT_LEVEL_1_PTS
-                End If
-                On Error GoTo 0
-            Else
-                ' Higher indent levels (Level 2+): Apply Table:Indent style with explicit LeftIndent
-                On Error Resume Next
-                finalTable.Cell(targetRowOffset, 1).Range.Style = "Table:Indent"
-                If Err.Number <> 0 Then Err.Clear
-                On Error GoTo 0
-                finalTable.Cell(targetRowOffset, 1).Range.ParagraphFormat.LeftIndent = indVal
-            End If
+        Set tablesToInsert = PromptMultiTableSelection(parsedTablesColl)
+        If tablesToInsert.Count = 0 Then
+            Application.ScreenUpdating = True
+            Application.DisplayAlerts = -1
+            Exit Sub
         End If
-    Next rItem
-    
-    ' 8. Close Landscape section if one was opened
-    If requiresLandscape Then
-        Dim afterRange As Range
-        Set afterRange = finalTable.Range
-        afterRange.Collapse 0 ' wdCollapseEnd
-        CloseLandscapeSection afterRange
     End If
+    
+    ' 5b. Check if any selected table is a long incidence/grade table (> 40 rows) and offer threshold filtering
+    PromptAndFilterSelectedTables tablesToInsert
+    
+    ' 6. Insert selected CSR tables into target document
+    Set targetRange = Selection.Range
+    Dim insTbl As Variant
+    Dim lastTbl As Table
+    Dim insertCount As Long: insertCount = 0
+    
+    For Each insTbl In tablesToInsert
+        If insertCount > 0 Then
+            ' Insert paragraph break between consecutive tables
+            targetRange.Collapse 0 ' wdCollapseEnd
+            targetRange.InsertParagraphAfter
+            targetRange.Collapse 0 ' wdCollapseEnd
+        End If
+        
+        Set lastTbl = InsertSingleCSRTable(targetDoc, targetRange, insTbl, defaultSourceNumber, hfFootnotes)
+        insertCount = insertCount + 1
+        
+        Set targetRange = lastTbl.Range
+        targetRange.Collapse 0 ' wdCollapseEnd
+    Next insTbl
     
     Application.ScreenUpdating = True
     Application.DisplayAlerts = -1
     
-    MsgBox "Table imported and Takeda CSR formatting successfully applied!" & vbCrLf & _
-           "Orientation: " & IIf(requiresLandscape, "Landscape", "Portrait") & vbCrLf & _
-           "Columns: " & colCount & " | Data Rows: " & bodyRowsColl.Count, vbInformation, "Takeda CSR Tools"
+    If insertCount = 1 Then
+        Dim sTbl As Object: Set sTbl = tablesToInsert(1)
+        MsgBox "Table imported and Takeda CSR formatting successfully applied!" & vbCrLf & _
+               "Title: " & sTbl("FullTitle") & vbCrLf & _
+               "Columns: " & sTbl("ColCount") & " | Data Rows: " & sTbl("BodyRows").Count, vbInformation, "Takeda CSR Tools"
+    Else
+        MsgBox "Successfully imported and formatted " & insertCount & " CSR tables!", vbInformation, "Takeda CSR Tools"
+    End If
     Exit Sub
-
+    
 ErrorHandler:
     If Not stagingDoc Is Nothing Then
         On Error Resume Next
@@ -406,6 +514,197 @@ ErrorHandler:
     Application.DisplayAlerts = -1
     MsgBox "An error occurred during RTF import: " & Err.Description, vbCritical, "Takeda CSR Tools Error"
 End Sub
+
+Private Function InsertSingleCSRTable( _
+    ByVal targetDoc As Document, _
+    ByRef targetRange As Range, _
+    ByVal tblData As Object, _
+    ByVal defaultSourceNumber As String, _
+    ByVal extraFootnotes As Collection _
+) As Table
+
+    Dim requiresLandscape As Boolean
+    Dim colCount As Long: colCount = tblData("ColCount")
+    Dim totalWidthPts As Single: totalWidthPts = CSng(tblData("TotalWidthPts"))
+    Dim numHeaderRows As Long: numHeaderRows = tblData("NumHeaderRows")
+    Dim bodyRowsColl As Collection: Set bodyRowsColl = tblData("BodyRows")
+    Dim distinctFootnotes As Collection: Set distinctFootnotes = tblData("Footnotes")
+    
+    If colCount >= CSR_AUTO_LANDSCAPE_COL_THRESHOLD Or totalWidthPts > CSR_PORTRAIT_MAX_WIDTH_PTS Then
+        requiresLandscape = True
+    Else
+        requiresLandscape = False
+    End If
+    
+    If requiresLandscape Then
+        InsertLandscapeSection targetRange
+    End If
+    
+    Dim totalTargetRows As Long
+    totalTargetRows = 1 + numHeaderRows + bodyRowsColl.Count + 1 ' Title + Headers + Body + Footnotes
+    
+    Dim finalTable As Table
+    Set finalTable = targetDoc.Tables.Add(Range:=targetRange, NumRows:=totalTargetRows, NumColumns:=colCount)
+    
+    ' Populate Row 1: Title with Proper Cross-Referenceable Field Codes
+    If colCount > 1 Then
+        finalTable.Rows(1).Cells.Merge
+    End If
+    Dim srcNum As String: srcNum = tblData("SourceNumber")
+    If Len(srcNum) = 0 Then srcNum = defaultSourceNumber
+    InsertCrossReferencedTitle finalTable.Rows(1).Cells(1).Range, tblData("FullTitle")
+    
+    ' Populate Header Rows
+    Dim hVals As Variant: hVals = tblData("HeaderValues")
+    Dim rIdx As Long, cIdx As Long
+    For rIdx = 1 To numHeaderRows
+        For cIdx = 1 To colCount
+            finalTable.Rows(1 + rIdx).Cells(cIdx).Range.Text = hVals(rIdx, cIdx)
+        Next cIdx
+        ApplyHeaderRowStyle finalTable.Rows(1 + rIdx)
+        MergeAdjacentIdenticalHeaderCells finalTable.Rows(1 + rIdx), colCount
+    Next rIdx
+    
+    ' Populate Body Rows
+    Dim targetRowOffset As Long: targetRowOffset = 1 + numHeaderRows
+    Dim rItem As Variant, rVals As Variant
+    For Each rItem In bodyRowsColl
+        targetRowOffset = targetRowOffset + 1
+        rVals = rItem(0)
+        For cIdx = 1 To colCount
+            finalTable.Rows(targetRowOffset).Cells(cIdx).Range.Text = rVals(cIdx)
+        Next cIdx
+    Next rItem
+    
+    ' Populate Footnotes Row (Merged across all columns)
+    Dim footnoteRowIdx As Long: footnoteRowIdx = totalTargetRows
+    If colCount > 1 Then
+        finalTable.Rows(footnoteRowIdx).Cells.Merge
+    End If
+    
+    Dim combinedFootnotes As String
+    combinedFootnotes = "Source: " & srcNum & "." & vbCr
+    Dim fnItem As Variant
+    For Each fnItem In distinctFootnotes
+        combinedFootnotes = combinedFootnotes & CStr(fnItem) & vbCr
+    Next fnItem
+    If Not extraFootnotes Is Nothing Then
+        For Each fnItem In extraFootnotes
+            If Not CollectionContains(distinctFootnotes, CStr(fnItem)) Then
+                combinedFootnotes = combinedFootnotes & CStr(fnItem) & vbCr
+            End If
+        Next fnItem
+    End If
+    Do While Right(combinedFootnotes, 1) = vbCr Or Right(combinedFootnotes, 1) = " "
+        combinedFootnotes = Left(combinedFootnotes, Len(combinedFootnotes) - 1)
+    Loop
+    finalTable.Rows(footnoteRowIdx).Cells(1).Range.Text = combinedFootnotes
+    ApplyFootnoteStyle finalTable.Rows(footnoteRowIdx).Cells(1).Range
+    
+    ' Apply Full Takeda CSR Table Rules (Borders, Padding, AutoFit, Base Row Styles)
+    FormatCSRTableStructure finalTable, numHeaderRows:=numHeaderRows
+    
+    ' Re-apply Hierarchy Indentations & Styles to Column 1
+    targetRowOffset = 1 + numHeaderRows
+    Dim rInds As Variant, indVal As Single
+    For Each rItem In bodyRowsColl
+        targetRowOffset = targetRowOffset + 1
+        rInds = rItem(1)
+        indVal = CSng(rInds(1))
+        If indVal > 0 Then
+            If indVal <= CSR_INDENT_LEVEL_1_PTS Then
+                On Error Resume Next
+                finalTable.Rows(targetRowOffset).Cells(1).Range.Style = "Table:Indent"
+                If Err.Number <> 0 Then Err.Clear
+                On Error GoTo 0
+                finalTable.Rows(targetRowOffset).Cells(1).Range.ParagraphFormat.LeftIndent = indVal
+            Else
+                On Error Resume Next
+                finalTable.Rows(targetRowOffset).Cells(1).Range.Style = "Table:Text"
+                If Err.Number <> 0 Then Err.Clear
+                On Error GoTo 0
+                finalTable.Rows(targetRowOffset).Cells(1).Range.ParagraphFormat.LeftIndent = indVal
+            End If
+        End If
+    Next rItem
+    
+    ' Close landscape section if opened
+    If requiresLandscape Then
+        Dim afterRange As Range
+        Set afterRange = finalTable.Range
+        afterRange.Collapse 0 ' wdCollapseEnd
+        CloseLandscapeSection afterRange
+    End If
+    
+    Set InsertSingleCSRTable = finalTable
+End Function
+
+Private Sub MergeAdjacentIdenticalHeaderCells(ByVal rowObj As Row, ByVal colCount As Long)
+    Dim cStart As Long
+    Dim cEnd As Long
+    Dim matchText As String
+    Dim currText As String
+    
+    cStart = 1
+    Do While cStart < rowObj.Cells.Count
+        matchText = CleanCellString(rowObj.Cells(cStart).Range.Text)
+        If Len(matchText) > 0 Then
+            cEnd = cStart + 1
+            Do While cEnd <= rowObj.Cells.Count
+                currText = CleanCellString(rowObj.Cells(cEnd).Range.Text)
+                If currText = matchText Then
+                    cEnd = cEnd + 1
+                Else
+                    Exit Do
+                End If
+            Loop
+            
+            If cEnd - 1 > cStart Then
+                On Error Resume Next
+                rowObj.Cells(cStart).Merge MergeTo:=rowObj.Cells(cEnd - 1)
+                rowObj.Cells(cStart).Range.Text = matchText
+                rowObj.Cells(cStart).Range.ParagraphFormat.Alignment = 1 ' wdAlignParagraphCenter
+                On Error GoTo 0
+            End If
+        End If
+        cStart = cStart + 1
+    Loop
+End Sub
+
+Private Function FindColumnSpanEnd(colWidths() As Single, ByVal colCount As Long, ByVal targetRightPts As Single) As Long
+    Dim c As Long
+    Dim runningW As Single: runningW = 0#
+    For c = 1 To colCount
+        runningW = runningW + colWidths(c)
+        If runningW >= (targetRightPts - 2#) Then
+            FindColumnSpanEnd = c
+            Exit Function
+        End If
+    Next c
+    FindColumnSpanEnd = colCount
+End Function
+
+Private Function GetPrecedingTableTitle(ByVal tbl As Table) As String
+    Dim p As Paragraph
+    Dim rng As Range
+    On Error Resume Next
+    Set rng = tbl.Range
+    rng.Collapse 1 ' wdCollapseStart
+    
+    Dim i As Long
+    For i = 1 To 5
+        rng.MoveStart 4, -1 ' 4 = wdParagraph
+        Set p = rng.Paragraphs(1)
+        Dim t As String
+        t = Trim(CleanParagraphString(p.Range.Text))
+        If InStr(1, t, "Table ", vbTextCompare) = 1 Or InStr(1, t, "Listing ", vbTextCompare) = 1 Then
+            GetPrecedingTableTitle = p.Range.Text
+            Exit Function
+        End If
+    Next i
+    On Error GoTo 0
+    GetPrecedingTableTitle = ""
+End Function
 
 Public Sub FormatCurrentSelectionAsCSRTable()
     Dim tbl As Table
@@ -475,10 +774,6 @@ FallbackPlain:
     rngCell.Text = "Table " & vbTab & strCleanTitle
     ApplyCaptionStyle rngCell
 End Sub
-
-' ==============================================================================
-' TABULATURE & HIERARCHY INDENTATION ENGINE
-' ==============================================================================
 
 Private Function DetermineIndentPoints(ByVal srcIndentPts As Single, ByVal strCellText As String) As Single
     Dim leadSpaces As Long
@@ -587,12 +882,15 @@ End Sub
 
 Private Sub UnlinkHeadersAndFooters(ByRef sec As Section)
     Dim hf As HeaderFooter
+    On Error Resume Next
     For Each hf In sec.Headers
         hf.LinkToPrevious = False
     Next hf
     For Each hf In sec.Footers
         hf.LinkToPrevious = False
     Next hf
+    Err.Clear
+    On Error GoTo 0
 End Sub
 
 ' ==============================================================================
@@ -644,10 +942,10 @@ Public Sub FormatCSRTableStructure(ByVal tbl As Table, ByVal numHeaderRows As Lo
         
         ' Format Row Stub Column 1 in Sentence Case if applicable (e.g. for pre-existing tables)
         Dim stubCell As Cell
-        Set stubCell = tbl.Cell(rIdx, 1)
+        Set stubCell = tbl.Rows(rIdx).Cells(1)
         Dim stubText As String
         stubText = stubCell.Range.Text
-        If Len(stubText) > 2 Then
+        If Len(stubText) >= 2 Then
             ' Word cell text ends with Chr(13) & Chr(7)
             stubText = Left(stubText, Len(stubText) - 2)
             Dim formattedStub As String
@@ -658,14 +956,14 @@ Public Sub FormatCSRTableStructure(ByVal tbl As Table, ByVal numHeaderRows As Lo
         End If
         
         ' Check if Column 1 has existing indent to apply Table:Indent style
+        On Error Resume Next
         If stubCell.Range.ParagraphFormat.LeftIndent > 0 Then
             If stubCell.Range.ParagraphFormat.LeftIndent <= CSR_INDENT_LEVEL_1_PTS Then
-                On Error Resume Next
                 stubCell.Range.Style = "Table:Indent"
                 If Err.Number <> 0 Then Err.Clear
-                On Error GoTo 0
             End If
         End If
+        On Error GoTo 0
     Next rIdx
     
     ' -------------------------------------------------------------------------
@@ -848,7 +1146,7 @@ Private Sub ColorCitationsInFootnotes(ByVal tbl As Table)
     
     For Each pType In Array("Table ", "Listing ", "Figure ")
         searchWord = CStr(pType)
-        Set fnRange = tbl.Cell(footnoteRowIdx, 1).Range
+        Set fnRange = tbl.Rows(footnoteRowIdx).Cells(1).Range
         Set rFind = fnRange.Duplicate
         
         With rFind.Find
@@ -1087,6 +1385,10 @@ Private Function CleanParagraphString(ByVal s As String) As String
     res = Replace(res, "=<", ChrW(8804))
     Do While InStr(res, " =") > 0: res = Replace(res, " =", "="): Loop
     Do While InStr(res, "= ") > 0: res = Replace(res, "= ", "="): Loop
+    Do While InStr(res, ChrW(8805) & " ") > 0: res = Replace(res, ChrW(8805) & " ", ChrW(8805)): Loop
+    Do While InStr(res, ChrW(8804) & " ") > 0: res = Replace(res, ChrW(8804) & " ", ChrW(8804)): Loop
+    Do While InStr(res, "> ") > 0: res = Replace(res, "> ", ">"): Loop
+    Do While InStr(res, "< ") > 0: res = Replace(res, "< ", "<"): Loop
     Do While InStr(res, "  ") > 0
         res = Replace(res, "  ", " ")
     Loop
@@ -1095,8 +1397,15 @@ End Function
 
 Private Function CleanHeaderCellString(ByVal s As String) As String
     Dim res As String
-    res = Replace(s, Chr(13), "")
-    res = Replace(res, Chr(7), "")
+    res = Replace(s, Chr(7), "")
+    
+    Do While Right(res, 1) = Chr(13) Or Right(res, 1) = Chr(10)
+        res = Left(res, Len(res) - 1)
+    Loop
+    
+    res = Replace(res, vbCrLf, Chr(11))
+    res = Replace(res, Chr(13), Chr(11))
+    res = Replace(res, Chr(10), Chr(11))
     res = Replace(res, Chr(160), " ")
     res = Replace(res, ">=", ChrW(8805))
     res = Replace(res, "=>", ChrW(8805))
@@ -1105,26 +1414,248 @@ Private Function CleanHeaderCellString(ByVal s As String) As String
     Do While InStr(res, " =") > 0: res = Replace(res, " =", "="): Loop
     Do While InStr(res, "= ") > 0: res = Replace(res, "= ", "="): Loop
     
-    ' Strip whitespace directly bordering soft line breaks Chr(11)
-    Do While InStr(res, " " & Chr(11)) > 0
-        res = Replace(res, " " & Chr(11), Chr(11))
-    Loop
-    Do While InStr(res, Chr(11) & " ") > 0
-        res = Replace(res, Chr(11) & " ", Chr(11))
-    Loop
+    Do While InStr(res, " " & Chr(11)) > 0: res = Replace(res, " " & Chr(11), Chr(11)): Loop
+    Do While InStr(res, Chr(11) & " ") > 0: res = Replace(res, Chr(11) & " ", Chr(11)): Loop
+    Do While InStr(res, Chr(11) & Chr(11)) > 0: res = Replace(res, Chr(11) & Chr(11), Chr(11)): Loop
     
-    ' Collapse runs of 3 or more spaces into a soft line break Chr(11) (stacks SAS labels)
-    Do While InStr(res, "   ") > 0
-        res = Replace(res, "   ", Chr(11))
-    Loop
-    
-    ' Collapse double spaces to single space
-    Do While InStr(res, "  ") > 0
-        res = Replace(res, "  ", " ")
-    Loop
+    Do While InStr(res, "   ") > 0: res = Replace(res, "   ", Chr(11)): Loop
+    Do While InStr(res, "  ") > 0: res = Replace(res, "  ", " "): Loop
     
     CleanHeaderCellString = Trim(res)
 End Function
+
+Private Sub ScanHeaderFooterMetadata(ByVal doc As Document, ByRef outTitleBlock As String, ByVal fnColl As Collection)
+    Dim sec As Section
+    Dim hfIdx As Long
+    Dim hf As HeaderFooter
+    
+    On Error Resume Next
+    For Each sec In doc.Sections
+        For hfIdx = 1 To 3 ' primary, first page, even pages
+            Set hf = Nothing
+            Set hf = sec.Headers(hfIdx)
+            If Not hf Is Nothing Then
+                If hf.Exists And Len(outTitleBlock) = 0 Then
+                    outTitleBlock = ExtractTitleBlockFromStory(hf.Range)
+                End If
+            End If
+            
+            Set hf = Nothing
+            Set hf = sec.Footers(hfIdx)
+            If Not hf Is Nothing Then
+                If hf.Exists Then
+                    AddFooterFootnotes hf.Range, fnColl
+                End If
+            End If
+        Next hfIdx
+    Next sec
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+Private Function ExtractTitleBlockFromStory(ByVal rng As Range) As String
+    Dim p As Paragraph
+    Dim parts() As String
+    Dim k As Long
+    Dim ln As String
+    Dim blk As String
+    Dim started As Boolean
+    
+    blk = ""
+    started = False
+    For Each p In rng.Paragraphs
+        parts = Split(Replace(Replace(p.Range.Text, Chr(7), ""), Chr(13), ""), Chr(11))
+        For k = LBound(parts) To UBound(parts)
+            ln = Trim(CleanParagraphString(parts(k)))
+            If Len(ln) > 0 Then
+                If Not started Then
+                    If IsTableNumberLine(ln) Then
+                        started = True
+                        blk = ln
+                    End If
+                ElseIf Not IsFooterBoilerplateLine(ln) And Not IsSubgroupByline(ln) Then
+                    blk = blk & Chr(11) & ln
+                End If
+            End If
+        Next k
+    Next p
+    ExtractTitleBlockFromStory = blk
+End Function
+
+Private Function IsSubgroupByline(ByVal s As String) As Boolean
+    Dim t As String
+    Dim colonPos As Long
+    t = LCase(Trim(s))
+    IsSubgroupByline = False
+    If Len(t) = 0 Then Exit Function
+    
+    ' Exclude header/footer boilerplate and population lines
+    If IsFooterBoilerplateLine(t) Then Exit Function
+    If IsTableNumberLine(s) Then Exit Function
+    If Left(t, 11) = "population:" Or Left(t, 13) = "analysis set:" Then Exit Function
+    If Left(t, 5) = "note:" Or Left(t, 7) = "source:" Then Exit Function
+    
+    ' Any SAS BY-line in the header formatted as "Category: Value" (e.g. Treatment:, Age:, Gender:, Race:, BMI:, etc.)
+    colonPos = InStr(t, ":")
+    If colonPos >= 2 And colonPos <= 45 And colonPos < Len(t) Then
+        IsSubgroupByline = True
+    End If
+End Function
+
+Private Sub PreScanSectionSubgroups(ByVal doc As Document, ByRef outSubgroups() As String)
+    Dim secCount As Long
+    Dim sIdx As Long
+    Dim hfIdx As Long
+    Dim hf As HeaderFooter
+    Dim p As Paragraph
+    Dim parts() As String
+    Dim k As Long
+    Dim ln As String
+    Dim foundSub As String
+    Dim lastSub As String
+    
+    On Error Resume Next
+    secCount = doc.Sections.Count
+    If secCount <= 0 Then
+        ReDim outSubgroups(1 To 1)
+        outSubgroups(1) = ""
+        On Error GoTo 0
+        Exit Sub
+    End If
+    
+    ReDim outSubgroups(1 To secCount)
+    lastSub = ""
+    
+    For sIdx = 1 To secCount
+        foundSub = ""
+        For hfIdx = 1 To 3
+            Set hf = Nothing
+            Set hf = doc.Sections(sIdx).Headers(hfIdx)
+            If Not hf Is Nothing Then
+                If hf.Exists Then
+                    For Each p In hf.Range.Paragraphs
+                        parts = Split(Replace(Replace(p.Range.Text, Chr(7), ""), Chr(13), ""), Chr(11))
+                        For k = LBound(parts) To UBound(parts)
+                            ln = Trim(CleanParagraphString(parts(k)))
+                            If IsSubgroupByline(ln) Then
+                                foundSub = ln
+                                Exit For
+                            End If
+                        Next k
+                        If Len(foundSub) > 0 Then Exit For
+                    Next p
+                End If
+            End If
+            If Len(foundSub) > 0 Then Exit For
+        Next hfIdx
+        
+        If Len(foundSub) > 0 Then
+            lastSub = foundSub
+        End If
+        outSubgroups(sIdx) = lastSub
+    Next sIdx
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+Private Sub AddFooterFootnotes(ByVal rng As Range, ByVal fnColl As Collection)
+    Dim p As Paragraph
+    Dim parts() As String
+    Dim k As Long
+    Dim ln As String
+    
+    For Each p In rng.Paragraphs
+        parts = Split(Replace(Replace(p.Range.Text, Chr(7), ""), Chr(13), ""), Chr(11))
+        For k = LBound(parts) To UBound(parts)
+            ln = Trim(CleanParagraphString(parts(k)))
+            If Len(ln) > 0 Then
+                If Not IsFooterBoilerplateLine(ln) Then
+                    If Not CollectionContains(fnColl, ln) Then
+                        fnColl.Add ln
+                    End If
+                End If
+            End If
+        Next k
+    Next p
+End Sub
+
+Private Function IsTableNumberLine(ByVal s As String) As Boolean
+    Dim w As Variant
+    Dim n As Long
+    IsTableNumberLine = False
+    For Each w In Array("Table ", "Listing ", "Figure ")
+        n = Len(w)
+        If Len(s) > n Then
+            If StrComp(Left(s, n), CStr(w), vbTextCompare) = 0 Then
+                If Mid(s, n + 1, 1) Like "#" Then
+                    IsTableNumberLine = True
+                    Exit Function
+                End If
+            End If
+        End If
+    Next w
+End Function
+
+Private Function IsFooterBoilerplateLine(ByVal s As String) As Boolean
+    Dim t As String
+    t = LCase(Trim(s))
+    IsFooterBoilerplateLine = True
+    If Len(t) = 0 Then Exit Function
+    If InStr(t, "generated on") > 0 Then Exit Function
+    If InStr(t, "program:") > 0 Then Exit Function
+    If InStr(t, "executed:") > 0 Then Exit Function
+    If InStr(t, "protocol:") > 0 Then Exit Function
+    If InStr(t, "/programs/") > 0 Or InStr(t, "\programs\") > 0 Then Exit Function
+    If InStr(t, ".sas") > 0 Then Exit Function
+    If Left(t, 3) = "../" Or Left(t, 1) = "/" Then Exit Function
+    If Left(t, 5) = "page " And InStr(t, " of ") > 0 Then Exit Function
+    IsFooterBoilerplateLine = False
+End Function
+
+Private Function JoinTitleLines(ByVal prevLine As String, ByVal nextLine As String) As String
+    ' Separate SAS TITLE lines are joined with ", " unless the previous line already ends
+    ' in punctuation, ends with a connector word (manual wrap), or the next line starts lowercase.
+    Dim lastCh As String
+    Dim lastWord As String
+    Dim sp As Long
+    Dim firstCh As String
+    
+    lastCh = Right(prevLine, 1)
+    sp = InStrRev(prevLine, " ")
+    lastWord = LCase(Mid(prevLine, sp + 1))
+    firstCh = Left(nextLine, 1)
+    
+    If InStr(1, ",;:-(/", lastCh) > 0 Then
+        JoinTitleLines = prevLine & " " & nextLine
+    ElseIf InStr(1, "|and|or|of|by|in|for|the|with|to|per|from|at|on|vs|versus|", "|" & lastWord & "|") > 0 Then
+        JoinTitleLines = prevLine & " " & nextLine
+    ElseIf firstCh Like "[a-z(]" Then
+        JoinTitleLines = prevLine & " " & nextLine
+    Else
+        JoinTitleLines = prevLine & ", " & nextLine
+    End If
+End Function
+
+Private Sub AddFootnotesFromText(ByVal fnColl As Collection, ByVal rawText As String)
+    Dim norm As String
+    norm = Replace(Replace(Replace(rawText, Chr(7), ""), vbCrLf, vbCr), Chr(11), vbCr)
+    norm = Replace(norm, vbLf, vbCr)
+    
+    Dim lines() As String
+    lines = Split(norm, vbCr)
+    Dim i As Long
+    For i = LBound(lines) To UBound(lines)
+        Dim cleanL As String
+        cleanL = CleanParagraphString(lines(i))
+        If Len(cleanL) > 0 Then
+            If IsFootnoteParagraph(cleanL) Then
+                If Not CollectionContains(fnColl, cleanL) Then
+                    fnColl.Add cleanL
+                End If
+            End If
+        End If
+    Next i
+End Sub
 
 Private Function CleanCellString(ByVal s As String) As String
     Dim res As String
@@ -1142,16 +1673,20 @@ Private Function CleanCellString(ByVal s As String) As String
     Do While InStr(res, ChrW(8804) & " ") > 0: res = Replace(res, ChrW(8804) & " ", ChrW(8804)): Loop
     Do While InStr(res, "> ") > 0: res = Replace(res, "> ", ">"): Loop
     Do While InStr(res, "< ") > 0: res = Replace(res, "< ", "<"): Loop
+    Do While InStr(res, "  ") > 0: res = Replace(res, "  ", " "): Loop
     CleanCellString = Trim(res)
 End Function
 
 Private Function CollectionContains(ByVal coll As Collection, ByVal keyVal As String) As Boolean
-    On Error Resume Next
-    Dim v As Variant
-    v = coll(keyVal)
-    CollectionContains = (Err.Number = 0)
-    Err.Clear
-    On Error GoTo 0
+    Dim item As Variant
+    CollectionContains = False
+    If coll Is Nothing Then Exit Function
+    For Each item In coll
+        If StrComp(CStr(item), keyVal, vbTextCompare) = 0 Then
+            CollectionContains = True
+            Exit Function
+        End If
+    Next item
 End Function
 
 ' ==============================================================================
@@ -1400,7 +1935,7 @@ Private Function ExtractCleanTitleWithPopulation(ByVal rawParaText As String, By
         mainTitle = ""
         For i = 1 To validCount - 2
             If Len(mainTitle) > 0 Then
-                mainTitle = mainTitle & " " & validLines(i)
+                mainTitle = JoinTitleLines(mainTitle, validLines(i))
             Else
                 mainTitle = validLines(i)
             End If
@@ -1807,4 +2342,619 @@ Private Function GetProperNoun(ByVal w As String) As String
         Case Else: GetProperNoun = ""
     End Select
 End Function
+
+' ==============================================================================
+' MULTI-SELECT TABLE SELECTION & LONG INCIDENCE TABLE THRESHOLD FILTERING
+' ==============================================================================
+
+Private Function IsContinuationStubRow(rowData() As String, ByVal colCount As Long) As Boolean
+    Dim stub As String
+    Dim c As Long
+    IsContinuationStubRow = False
+    stub = LCase(Trim(rowData(1)))
+    If Right(stub, 7) = "(cont.)" Or Right(stub, 11) = "(continued)" Then
+        For c = 2 To colCount
+            If Len(Trim(rowData(c))) > 0 Then
+                Exit Function
+            End If
+        Next c
+        IsContinuationStubRow = True
+    End If
+End Function
+
+Private Function PromptMultiTableSelection(ByVal allTables As Collection) As Collection
+    Dim res As Collection
+    Dim promptMsg As String
+    Dim pIdx As Long
+    Dim ptDict As Object
+    Dim totalCount As Long
+    Dim userChoice As String
+    
+    Set res = New Collection
+    totalCount = allTables.Count
+    promptMsg = "Found " & totalCount & " distinct tables/subgroup panels:" & vbCrLf & _
+                "Enter number(s)/range (e.g. '1', '5-8', '1-2, 5-8'), keyword (e.g. 'Race'), or 'All':" & vbCrLf & vbCrLf
+    
+    If totalCount <= 15 Then
+        For pIdx = 1 To totalCount
+            Set ptDict = allTables(pIdx)
+            Dim panelLabel As String
+            If Len(ptDict("Subtitle")) > 0 Then
+                panelLabel = SanitizeInputBoxText(CStr(ptDict("Subtitle"))) & " [" & ptDict("BodyRows").Count & " rows]"
+            Else
+                panelLabel = SanitizeInputBoxText(CStr(ptDict("FullTitle"))) & " [" & ptDict("BodyRows").Count & " rows]"
+            End If
+            promptMsg = promptMsg & pIdx & ": " & panelLabel & vbCrLf
+        Next pIdx
+    Else
+        ' Group by category prefix (before ':') and keep concise so InputBox never truncates at 1023 chars
+        Dim currCat As String: currCat = ""
+        Dim catStart As Long: catStart = 1
+        Dim catEnd As Long: catEnd = 1
+        Dim catVals As String: catVals = ""
+        
+        For pIdx = 1 To totalCount
+            Set ptDict = allTables(pIdx)
+            Dim subStr As String: subStr = SanitizeInputBoxText(Trim(CStr(ptDict("Subtitle"))))
+            Dim colonPos As Long: colonPos = InStr(subStr, ":")
+            Dim thisCat As String, thisVal As String
+            If colonPos > 0 Then
+                thisCat = ShortenPromptCategory(Trim(Left(subStr, colonPos - 1)))
+                thisVal = ShortenPromptValue(Trim(Mid(subStr, colonPos + 1)))
+            Else
+                thisCat = ShortenPromptCategory(subStr)
+                thisVal = ""
+            End If
+            
+            If pIdx = 1 Then
+                currCat = thisCat
+                catStart = 1
+                catEnd = 1
+                catVals = "1: " & thisVal
+            ElseIf StrComp(thisCat, currCat, vbTextCompare) = 0 Then
+                catEnd = pIdx
+                catVals = catVals & " | " & pIdx & ": " & thisVal
+            Else
+                If catStart = catEnd Then
+                    promptMsg = promptMsg & "[" & catStart & "] " & currCat & " (" & catVals & ")" & vbCrLf
+                Else
+                    promptMsg = promptMsg & "[" & catStart & "-" & catEnd & "] " & currCat & " (" & catVals & ")" & vbCrLf
+                End If
+                currCat = thisCat
+                catStart = pIdx
+                catEnd = pIdx
+                catVals = pIdx & ": " & thisVal
+            End If
+        Next pIdx
+        If catStart = catEnd Then
+            promptMsg = promptMsg & "[" & catStart & "] " & currCat & " (" & catVals & ")" & vbCrLf
+        Else
+            promptMsg = promptMsg & "[" & catStart & "-" & catEnd & "] " & currCat & " (" & catVals & ")" & vbCrLf
+        End If
+    End If
+    
+    userChoice = Trim(InputBox(promptMsg, "Select CSR Table(s) to Insert", "All"))
+    If Len(userChoice) = 0 Then
+        Set PromptMultiTableSelection = res
+        Exit Function
+    End If
+    
+    Set res = ParseMultiTableSelection(userChoice, allTables)
+    If res.Count = 0 Then
+        MsgBox "Invalid table selection: '" & userChoice & "'.", vbExclamation, "Takeda CSR Tools"
+    End If
+    Set PromptMultiTableSelection = res
+End Function
+
+Private Function SanitizeInputBoxText(ByVal s As String) As String
+    Dim res As String
+    res = Replace(s, ChrW(8805), ">=")
+    res = Replace(res, ChrW(8804), "<=")
+    SanitizeInputBoxText = res
+End Function
+
+Private Function ShortenPromptCategory(ByVal s As String) As String
+    Dim res As String
+    res = s
+    res = Replace(res, "Current use of ", "", 1, -1, vbTextCompare)
+    res = Replace(res, "Baseline presence of ", "Baseline ", 1, -1, vbTextCompare)
+    res = Replace(res, "Geographic Region", "Region", 1, -1, vbTextCompare)
+    ShortenPromptCategory = res
+End Function
+
+Private Function ShortenPromptValue(ByVal s As String) As String
+    Dim res As String
+    res = s
+    res = Replace(res, "BSA Affected by PsO", "BSA", 1, -1, vbTextCompare)
+    res = Replace(res, "Black Or African American", "Black/AA", 1, -1, vbTextCompare)
+    res = Replace(res, "Median of TJC (median=12)", "Med(12)", 1, -1, vbTextCompare)
+    res = Replace(res, "Median of SJC (median=7)", "Med(7)", 1, -1, vbTextCompare)
+    If Len(res) > 22 Then
+        res = Left(res, 20) & ".."
+    End If
+    ShortenPromptValue = res
+End Function
+
+Private Function ParseMultiTableSelection(ByVal userInput As String, ByVal allTables As Collection) As Collection
+    Dim res As Collection
+    Dim seen As Object
+    Dim cleaned As String
+    Dim tokens() As String
+    Dim tok As Variant
+    Dim tStr As String
+    Dim dashPos As Long
+    Dim startIdx As Long, endIdx As Long, k As Long
+    Dim maxCount As Long
+    
+    Set res = New Collection
+    Set seen = CreateObject("Scripting.Dictionary")
+    maxCount = allTables.Count
+    
+    cleaned = Trim(userInput)
+    If UCase(cleaned) = "ALL" Then
+        For k = 1 To maxCount
+            res.Add allTables(k)
+        Next k
+        Set ParseMultiTableSelection = res
+        Exit Function
+    End If
+    
+    cleaned = Replace(cleaned, ";", ",")
+    tokens = Split(cleaned, ",")
+    
+    For Each tok In tokens
+        tStr = Trim(CStr(tok))
+        ' Strip brackets if user typed '[1]' or '[5-8]'
+        If Left(tStr, 1) = "[" And Right(tStr, 1) = "]" And Len(tStr) > 2 Then
+            tStr = Trim(Mid(tStr, 2, Len(tStr) - 2))
+        End If
+        
+        ' Strip '1:...' or '1=...' if user copied value suffix along with index
+        Dim eqOrColPos As Long
+        eqOrColPos = InStr(tStr, "=")
+        If eqOrColPos = 0 Then eqOrColPos = InStr(tStr, ":")
+        If eqOrColPos > 1 Then
+            If IsNumeric(Trim(Left(tStr, eqOrColPos - 1))) Then
+                tStr = Trim(Left(tStr, eqOrColPos - 1))
+            End If
+        End If
+        
+        If Len(tStr) > 0 Then
+            dashPos = InStr(tStr, "-")
+            If dashPos > 1 And dashPos < Len(tStr) Then
+                Dim leftStr As String, rightStr As String
+                leftStr = Trim(Left(tStr, dashPos - 1))
+                rightStr = Trim(Mid(tStr, dashPos + 1))
+                If IsNumeric(leftStr) And IsNumeric(rightStr) Then
+                    startIdx = CLng(leftStr)
+                    endIdx = CLng(rightStr)
+                    If startIdx <= endIdx Then
+                        For k = startIdx To endIdx
+                            If k >= 1 And k <= maxCount Then
+                                If Not seen.Exists(CStr(k)) Then
+                                    seen.Add CStr(k), True
+                                    res.Add allTables(k)
+                                End If
+                            End If
+                        Next k
+                    End If
+                End If
+            ElseIf IsNumeric(tStr) Then
+                k = CLng(tStr)
+                If k >= 1 And k <= maxCount Then
+                    If Not seen.Exists(CStr(k)) Then
+                        seen.Add CStr(k), True
+                        res.Add allTables(k)
+                    End If
+                End If
+            Else
+                ' Match by subgroup/subtitle keyword (e.g. 'Race', 'Gender', 'Age', 'Placebo')
+                For k = 1 To maxCount
+                    Dim tblObj As Object: Set tblObj = allTables(k)
+                    Dim subText As String: subText = CStr(tblObj("Subtitle"))
+                    If InStr(1, subText, tStr, vbTextCompare) > 0 Then
+                        If Not seen.Exists(CStr(k)) Then
+                            seen.Add CStr(k), True
+                            res.Add tblObj
+                        End If
+                    End If
+                Next k
+            End If
+        End If
+    Next tok
+    
+    Set ParseMultiTableSelection = res
+End Function
+
+Private Sub PromptAndFilterSelectedTables(ByVal tablesToInsert As Collection)
+    Dim tblDict As Variant
+    Dim hasLongIncidenceTable As Boolean
+    Dim maxRows As Long
+    
+    hasLongIncidenceTable = False
+    maxRows = 0
+    For Each tblDict In tablesToInsert
+        If tblDict("BodyRows").Count >= 40 Then
+            If IsIncidenceCountTable(tblDict) Then
+                hasLongIncidenceTable = True
+                If tblDict("BodyRows").Count > maxRows Then
+                    maxRows = tblDict("BodyRows").Count
+                End If
+            End If
+        End If
+    Next tblDict
+    
+    If Not hasLongIncidenceTable Then Exit Sub
+    
+    Dim filterPrompt As String
+    filterPrompt = "Long table detected (" & maxRows & " data rows per panel)." & vbCrLf & vbCrLf & _
+                   "Choose a row filtering option (applied independently to each selected treatment/table):" & vbCrLf & _
+                   "  - '0' or Blank : Keep all rows (no filtering)" & vbCrLf & _
+                   "  - '>0' or '1'  : Remove rows with 0 across all columns/grades" & vbCrLf & _
+                   "  - 'n' (e.g. 2, 5) : Keep rows with >= n participants in any column/grade" & vbCrLf & _
+                   "  - 'x%' (e.g. 1%, 2%) : Keep rows with >= x% of participants in any column/grade" & vbCrLf & vbCrLf & _
+                   "Enter filter threshold:"
+    
+    Dim filterInput As String
+    filterInput = Trim(InputBox(filterPrompt, "Long CSR Table Row Filter", ">0"))
+    
+    If Len(filterInput) = 0 Or filterInput = "0" Or UCase(filterInput) = "ALL" Or UCase(filterInput) = "NONE" Then
+        Exit Sub
+    End If
+    
+    Dim filterMode As String ' "GT_ZERO", "MIN_COUNT", "MIN_PCT"
+    Dim minCount As Long
+    Dim minPct As Double
+    
+    ParseFilterThresholdInput filterInput, filterMode, minCount, minPct
+    If Len(filterMode) = 0 Then Exit Sub
+    
+    For Each tblDict In tablesToInsert
+        If tblDict("BodyRows").Count >= 40 And IsIncidenceCountTable(tblDict) Then
+            ApplyHierarchyRowFilterToTable tblDict, filterMode, minCount, minPct
+            UpdateFilteredTableTitle tblDict, filterMode, minCount, minPct
+        End If
+    Next tblDict
+End Sub
+
+Private Function IsIncidenceCountTable(ByVal tblDict As Object) As Boolean
+    Dim hVals As Variant
+    Dim r As Long, c As Long
+    Dim hText As String
+    Dim bodyRows As Collection
+    Dim rItem As Variant, rData As Variant
+    Dim stub As String
+    
+    IsIncidenceCountTable = False
+    On Error Resume Next
+    
+    ' 1. If body rows contain continuous summary statistic stubs (Mean (SD), Median, Q1, Q3, LS Mean), it is NOT an incidence table
+    Set bodyRows = tblDict("BodyRows")
+    If Not bodyRows Is Nothing Then
+        For Each rItem In bodyRows
+            rData = rItem(0)
+            stub = LCase(Trim(CStr(rData(1))))
+            If Left(stub, 9) = "mean (sd)" Or Left(stub, 6) = "median" Or _
+               Left(stub, 6) = "q1, q3" Or Left(stub, 8) = "min, max" Or _
+               Left(stub, 7) = "ls mean" Then
+                On Error GoTo 0
+                Exit Function
+            End If
+        Next rItem
+    End If
+    
+    ' 2. Check header cells for 'n (%)' or 'Grade '
+    hVals = tblDict("HeaderValues")
+    For r = LBound(hVals, 1) To UBound(hVals, 1)
+        For c = LBound(hVals, 2) To UBound(hVals, 2)
+            hText = LCase(Trim(CStr(hVals(r, c))))
+            If InStr(hText, "n (%)") > 0 Or InStr(hText, "grade ") > 0 Then
+                IsIncidenceCountTable = True
+                On Error GoTo 0
+                Exit Function
+            End If
+        Next c
+    Next r
+    On Error GoTo 0
+End Function
+
+Private Sub ParseFilterThresholdInput( _
+    ByVal rawInput As String, _
+    ByRef outMode As String, _
+    ByRef outMinCount As Long, _
+    ByRef outMinPct As Double _
+)
+    Dim s As String
+    outMode = ""
+    outMinCount = 0
+    outMinPct = 0#
+    
+    s = Trim(rawInput)
+    s = Replace(s, ChrW(8805), "")
+    s = Replace(s, ">=", "")
+    s = Replace(s, "=>", "")
+    s = Trim(s)
+    
+    If s = ">0" Or s = "> 0" Or s = "1" Then
+        outMode = "GT_ZERO"
+        outMinCount = 1
+        Exit Sub
+    End If
+    
+    If Left(s, 1) = ">" Then
+        s = Trim(Mid(s, 2))
+        If Right(s, 1) = "%" Then
+            Dim pctPartGt As String
+            pctPartGt = Trim(Left(s, Len(s) - 1))
+            If IsNumeric(pctPartGt) Then
+                outMode = "MIN_PCT"
+                outMinPct = CDbl(pctPartGt)
+            End If
+        ElseIf IsNumeric(s) Then
+            Dim valGt As Long
+            valGt = CLng(s)
+            If valGt <= 0 Then
+                outMode = "GT_ZERO"
+                outMinCount = 1
+            Else
+                outMode = "MIN_COUNT"
+                outMinCount = valGt + 1
+            End If
+        End If
+        Exit Sub
+    End If
+    
+    If Right(s, 1) = "%" Then
+        Dim pctPart As String
+        pctPart = Trim(Left(s, Len(s) - 1))
+        If IsNumeric(pctPart) Then
+            outMode = "MIN_PCT"
+            outMinPct = CDbl(pctPart)
+        End If
+        Exit Sub
+    End If
+    
+    If IsNumeric(s) Then
+        Dim nVal As Long
+        nVal = CLng(s)
+        If nVal = 1 Then
+            outMode = "GT_ZERO"
+            outMinCount = 1
+        ElseIf nVal > 1 Then
+            outMode = "MIN_COUNT"
+            outMinCount = nVal
+        End If
+    End If
+End Sub
+
+Private Sub ApplyHierarchyRowFilterToTable( _
+    ByVal tblDict As Object, _
+    ByVal filterMode As String, _
+    ByVal minCount As Long, _
+    ByVal minPct As Double _
+)
+    Dim srcRows As Collection
+    Dim filteredRows As Collection
+    Dim colCount As Long
+    Dim totalRows As Long
+    Dim i As Long, j As Long
+    
+    Set srcRows = tblDict("BodyRows")
+    colCount = CLng(tblDict("ColCount"))
+    totalRows = srcRows.Count
+    If totalRows = 0 Then Exit Sub
+    
+    Set filteredRows = New Collection
+    i = 1
+    Do While i <= totalRows
+        Dim rItem As Variant
+        Dim rData As Variant
+        Dim rInds As Variant
+        Dim indentPts As Single
+        
+        rItem = srcRows(i)
+        rData = rItem(0)
+        rInds = rItem(1)
+        indentPts = CSng(rInds(1))
+        
+        If indentPts <= 0.1 Then
+            ' Unindented row: check if followed by indented child rows (e.g. SOC heading with Preferred Terms)
+            Dim childrenIndices As Collection
+            Set childrenIndices = New Collection
+            j = i + 1
+            Do While j <= totalRows
+                Dim childItem As Variant
+                Dim childInds As Variant
+                childItem = srcRows(j)
+                childInds = childItem(1)
+                If CSng(childInds(1)) > 0.1 Then
+                    childrenIndices.Add j
+                    j = j + 1
+                Else
+                    Exit Do
+                End If
+            Loop
+            
+            If childrenIndices.Count = 0 Then
+                ' Standalone unindented row (e.g. 'Participants with any TEAE' or unindented SOC with 0s)
+                If RowMeetsThreshold(rData, colCount, filterMode, minCount, minPct) Then
+                    filteredRows.Add rItem
+                End If
+            Else
+                ' Parent SOC heading with child Preferred Terms: keep parent if >= 1 child survives
+                Dim keptChildren As Collection
+                Set keptChildren = New Collection
+                Dim cIdxVar As Variant
+                For Each cIdxVar In childrenIndices
+                    Dim cItem As Variant
+                    Dim cData As Variant
+                    cItem = srcRows(CLng(cIdxVar))
+                    cData = cItem(0)
+                    If RowMeetsThreshold(cData, colCount, filterMode, minCount, minPct) Then
+                        keptChildren.Add cItem
+                    End If
+                Next cIdxVar
+                
+                If keptChildren.Count > 0 Then
+                    filteredRows.Add rItem
+                    Dim kcItem As Variant
+                    For Each kcItem In keptChildren
+                        filteredRows.Add kcItem
+                    Next kcItem
+                End If
+            End If
+            i = j
+        Else
+            ' Fallback if an indented row appears without an unindented parent
+            If RowMeetsThreshold(rData, colCount, filterMode, minCount, minPct) Then
+                filteredRows.Add rItem
+            End If
+            i = i + 1
+        End If
+    Loop
+    
+    tblDict.Remove "BodyRows"
+    Set tblDict("BodyRows") = filteredRows
+End Sub
+
+Private Function RowMeetsThreshold( _
+    ByRef rowData As Variant, _
+    ByVal colCount As Long, _
+    ByVal filterMode As String, _
+    ByVal minCount As Long, _
+    ByVal minPct As Double _
+) As Boolean
+    Dim c As Long
+    Dim cellVal As String
+    Dim nCount As Long
+    Dim pctVal As Double
+    
+    RowMeetsThreshold = False
+    For c = 2 To colCount
+        cellVal = Trim(CStr(rowData(c)))
+        ParseCountAndPercent cellVal, nCount, pctVal
+        If filterMode = "GT_ZERO" Then
+            If nCount >= 1 Or pctVal > 0# Then
+                RowMeetsThreshold = True
+                Exit Function
+            End If
+        ElseIf filterMode = "MIN_COUNT" Then
+            If nCount >= minCount Then
+                RowMeetsThreshold = True
+                Exit Function
+            End If
+        ElseIf filterMode = "MIN_PCT" Then
+            If nCount >= 1 And pctVal >= minPct Then
+                RowMeetsThreshold = True
+                Exit Function
+            End If
+        End If
+    Next c
+End Function
+
+Private Sub ParseCountAndPercent(ByVal cellText As String, ByRef outCount As Long, ByRef outPct As Double)
+    Dim s As String
+    Dim openP As Long, closeP As Long
+    Dim countPart As String, pctPart As String
+    
+    outCount = 0
+    outPct = 0#
+    s = Trim(cellText)
+    If Len(s) = 0 Or s = "0" Or s = "-" Or s = "NA" Then Exit Sub
+    
+    openP = InStr(s, "(")
+    If openP > 0 Then
+        countPart = Trim(Left(s, openP - 1))
+        closeP = InStr(openP, s, ")")
+        If closeP > openP Then
+            pctPart = Trim(Mid(s, openP + 1, closeP - openP - 1))
+        Else
+            pctPart = Trim(Mid(s, openP + 1))
+        End If
+        pctPart = Replace(pctPart, "%", "")
+        pctPart = Trim(pctPart)
+        
+        If IsNumeric(countPart) Then
+            outCount = CLng(CDbl(countPart))
+        End If
+        
+        If Left(pctPart, 1) = "<" Or Left(pctPart, 1) = ChrW(8804) Then
+            ' e.g. '<1' means > 0% but < 1%
+            outPct = 0.5
+        ElseIf Left(pctPart, 1) = ">" Or Left(pctPart, 1) = ChrW(8805) Then
+            Dim numAfter As String
+            numAfter = Trim(Mid(pctPart, 2))
+            If IsNumeric(numAfter) Then outPct = CDbl(numAfter)
+        ElseIf IsNumeric(pctPart) Then
+            outPct = CDbl(pctPart)
+        End If
+    ElseIf IsNumeric(s) Then
+        outCount = CLng(CDbl(s))
+    End If
+End Sub
+
+Private Sub UpdateFilteredTableTitle( _
+    ByVal tblDict As Object, _
+    ByVal filterMode As String, _
+    ByVal minCount As Long, _
+    ByVal minPct As Double _
+)
+    Dim baseT As String
+    Dim subT As String
+    Dim popT As String
+    Dim hasGrades As Boolean
+    Dim suffixUnit As String
+    Dim filterClause As String
+    Dim hVals As Variant
+    Dim r As Long, c As Long
+    
+    baseT = Trim(CStr(tblDict("Title")))
+    subT = Trim(CStr(tblDict("Subtitle")))
+    popT = Trim(CStr(tblDict("Population")))
+    
+    If Len(popT) > 0 Then
+        If Right(baseT, Len(popT)) = popT Then
+            baseT = Trim(Left(baseT, Len(baseT) - Len(popT)))
+        End If
+    End If
+    
+    hasGrades = (InStr(1, baseT, "Grade", vbTextCompare) > 0)
+    If Not hasGrades Then
+        On Error Resume Next
+        hVals = tblDict("HeaderValues")
+        For r = LBound(hVals, 1) To UBound(hVals, 1)
+            For c = LBound(hVals, 2) To UBound(hVals, 2)
+                If InStr(1, CStr(hVals(r, c)), "Grade", vbTextCompare) > 0 Then
+                    hasGrades = True
+                    Exit For
+                End If
+            Next c
+            If hasGrades Then Exit For
+        Next r
+        On Error GoTo 0
+    End If
+    
+    If hasGrades Then
+        suffixUnit = " in Any Grade"
+    Else
+        suffixUnit = " in Any Group"
+    End If
+    
+    If filterMode = "GT_ZERO" Then
+        filterClause = " (Occurring in " & ChrW(8805) & "1 Participant" & suffixUnit & ")"
+    ElseIf filterMode = "MIN_COUNT" Then
+        filterClause = " (Occurring in " & ChrW(8805) & CStr(minCount) & " Participants" & suffixUnit & ")"
+    ElseIf filterMode = "MIN_PCT" Then
+        filterClause = " (Occurring in " & ChrW(8805) & CStr(minPct) & "% of Participants" & suffixUnit & ")"
+    Else
+        filterClause = ""
+    End If
+    
+    Dim fullT As String
+    fullT = baseT & filterClause
+    If Len(subT) > 0 Then fullT = fullT & " - " & subT
+    If Len(popT) > 0 Then fullT = fullT & " " & popT
+    tblDict("FullTitle") = fullT
+End Sub
+
 
