@@ -478,9 +478,10 @@ Public Sub ImportAndFormatCSRTable()
         Exit Sub
     End If
     
-    ' Record original row counts before any threshold filtering so the confirmation card can report reductions
+    ' Normalize per-table indentation tiers and record original row counts before any threshold filtering
     Dim ptItem As Variant
     For Each ptItem In parsedTablesColl
+        NormalizeTableIndentLevels ptItem
         ptItem("OriginalRowCount") = ptItem("BodyRows").Count
     Next ptItem
     
@@ -682,6 +683,7 @@ Private Function InsertSingleCSRTable( _
     FormatCSRTableStructure finalTable, numHeaderRows:=numHeaderRows, skipStubReformat:=True
     
     ' Re-apply Hierarchy Indentations & Styles to Column 1
+    ' All indented rows receive "Table:Indent"; deeper levels (Level 2+) keep "Table:Indent" plus additional LeftIndent
     targetRowOffset = 1 + numHeaderRows
     Dim rInds As Variant, indVal As Single
     For Each rItem In bodyRowsColl
@@ -689,19 +691,15 @@ Private Function InsertSingleCSRTable( _
         rInds = rItem(1)
         indVal = CSng(rInds(1))
         If indVal > 0 Then
-            If indVal <= CSR_INDENT_LEVEL_1_PTS Then
-                On Error Resume Next
-                finalTable.Rows(targetRowOffset).Cells(1).Range.Style = "Table:Indent"
-                If Err.Number <> 0 Then Err.Clear
-                On Error GoTo 0
-                finalTable.Rows(targetRowOffset).Cells(1).Range.ParagraphFormat.LeftIndent = indVal
-            Else
-                On Error Resume Next
+            On Error Resume Next
+            finalTable.Rows(targetRowOffset).Cells(1).Range.Style = "Table:Indent"
+            If Err.Number <> 0 Then
+                Err.Clear
                 finalTable.Rows(targetRowOffset).Cells(1).Range.Style = "Table:Text"
                 If Err.Number <> 0 Then Err.Clear
-                On Error GoTo 0
-                finalTable.Rows(targetRowOffset).Cells(1).Range.ParagraphFormat.LeftIndent = indVal
             End If
+            On Error GoTo 0
+            finalTable.Rows(targetRowOffset).Cells(1).Range.ParagraphFormat.LeftIndent = indVal
         End If
     Next rItem
     
@@ -888,21 +886,118 @@ Private Function DetermineIndentPoints(ByVal srcIndentPts As Single, ByVal strCe
         Else
             DetermineIndentPoints = 6#
         End If
-    ' Priority 2: RTF \li Twip-based left indentations
+    ' Priority 2: RTF \li Twip-based left indentations (e.g. \li200=10pt, \li300=15pt, \li600=30pt)
     ElseIf srcIndentPts > 0 Then
-        If srcIndentPts >= 25# Then        ' \li540 = 27 pt
+        If srcIndentPts >= 32# Then        ' \li720+ = 36+ pt
             DetermineIndentPoints = CSR_INDENT_LEVEL_3_PTS
-        ElseIf srcIndentPts >= 15# Then    ' \li360 / \li400 = 18-20 pt
+        ElseIf srcIndentPts >= 16.5 Then   ' \li360 / \li400 / \li600 = 18-30 pt
             DetermineIndentPoints = CSR_INDENT_LEVEL_2_PTS
-        ElseIf srcIndentPts >= 5# Then     ' \li180 / \li200 = 9-10 pt
+        ElseIf srcIndentPts >= 4# Then     ' \li180 / \li200 / \li300 = 9-15 pt
             DetermineIndentPoints = CSR_INDENT_LEVEL_1_PTS
         Else
-            DetermineIndentPoints = srcIndentPts
+            DetermineIndentPoints = 0#
         End If
     Else
         DetermineIndentPoints = 0#
     End If
 End Function
+
+Private Sub NormalizeTableIndentLevels(ByVal tblDict As Object)
+    ' Ensures that whatever indentation step size SAS used in a given table (e.g., 2 vs 3 vs 4 spaces,
+    ' or \li200 vs \li300 vs \li360), the first positive indentation tier in the table is always mapped
+    ' to Level 1 (12 pt), the second tier to Level 2 (24 pt), the third to Level 3 (36 pt), etc.
+    Dim bodyRows As Collection
+    Dim tiers() As Single
+    Dim tierCount As Long
+    Dim i As Long, j As Long
+    Dim rItem As Variant
+    Dim rData As Variant
+    Dim rInds As Variant
+    Dim val As Single
+    Dim found As Boolean
+    Dim tmp As Single
+    
+    On Error Resume Next
+    Set bodyRows = tblDict("BodyRows")
+    If bodyRows Is Nothing Then
+        On Error GoTo 0
+        Exit Sub
+    End If
+    If bodyRows.Count = 0 Then
+        On Error GoTo 0
+        Exit Sub
+    End If
+    On Error GoTo 0
+    
+    tierCount = 0
+    ReDim tiers(1 To 8)
+    
+    For i = 1 To bodyRows.Count
+        rItem = bodyRows(i)
+        rInds = rItem(1)
+        val = CSng(rInds(1))
+        If val > 0.5 Then
+            found = False
+            For j = 1 To tierCount
+                If Abs(val - tiers(j)) < 1.5 Then
+                    found = True
+                    Exit For
+                End If
+            Next j
+            If Not found And tierCount < 8 Then
+                tierCount = tierCount + 1
+                tiers(tierCount) = val
+            End If
+        End If
+    Next i
+    
+    If tierCount = 0 Then Exit Sub
+    
+    ' Sort distinct positive tiers ascending
+    For i = 1 To tierCount - 1
+        For j = i + 1 To tierCount
+            If tiers(j) < tiers(i) Then
+                tmp = tiers(i)
+                tiers(i) = tiers(j)
+                tiers(j) = tmp
+            End If
+        Next j
+    Next i
+    
+    Dim normRows As Collection
+    Set normRows = New Collection
+    
+    For i = 1 To bodyRows.Count
+        rItem = bodyRows(i)
+        rData = rItem(0)
+        rInds = rItem(1)
+        val = CSng(rInds(1))
+        If val <= 0.5 Then
+            rInds(1) = 0#
+        Else
+            Dim matchedTier As Long: matchedTier = 1
+            For j = 1 To tierCount
+                If Abs(val - tiers(j)) < 1.5 Then
+                    matchedTier = j
+                    Exit For
+                End If
+            Next j
+            If matchedTier = 1 Then
+                rInds(1) = CSR_INDENT_LEVEL_1_PTS
+            ElseIf matchedTier = 2 Then
+                rInds(1) = CSR_INDENT_LEVEL_2_PTS
+            ElseIf matchedTier = 3 Then
+                rInds(1) = CSR_INDENT_LEVEL_3_PTS
+            Else
+                rInds(1) = CSR_INDENT_LEVEL_4_PTS
+            End If
+        End If
+        normRows.Add Array(rData, rInds)
+    Next i
+    
+    tblDict.Remove "BodyRows"
+    Set tblDict("BodyRows") = normRows
+End Sub
 
 Private Function CountLeadingSpaces(ByVal s As String) As Long
     Dim i As Long
@@ -1054,11 +1149,12 @@ Public Sub FormatCSRTableStructure(ByVal tbl As Table, ByVal numHeaderRows As Lo
             
             ' Check if Column 1 has existing indent to apply Table:Indent style
             On Error Resume Next
-            If stubCell.Range.ParagraphFormat.LeftIndent > 0 Then
-                If stubCell.Range.ParagraphFormat.LeftIndent <= CSR_INDENT_LEVEL_1_PTS Then
-                    stubCell.Range.Style = "Table:Indent"
-                    If Err.Number <> 0 Then Err.Clear
-                End If
+            Dim existingIndent As Single
+            existingIndent = stubCell.Range.ParagraphFormat.LeftIndent
+            If existingIndent > 0.5 Then
+                stubCell.Range.Style = "Table:Indent"
+                If Err.Number <> 0 Then Err.Clear
+                stubCell.Range.ParagraphFormat.LeftIndent = existingIndent
             End If
             On Error GoTo 0
         End If
@@ -1149,28 +1245,28 @@ Private Sub ConvertFootnoteCalloutsToSuperscriptLetters(ByVal tbl As Table)
     Dim numStr As String
     Dim letStr As String
     Dim r As Range
+    Dim nonFnRange As Range
     
-    ' 1. Convert numeric bracket callouts with leading space " [1]".." [9]" -> "a".."i" (superscript)
-    For i = 1 To 9
-        numStr = " [" & CStr(i) & "]"
-        letStr = Chr(96 + i)
-        
-        Set r = tbl.Range
-        With r.Find
-            .ClearFormatting
-            .Replacement.ClearFormatting
-            .Text = numStr
-            .Replacement.Text = letStr
-            .Replacement.Font.Superscript = True
-            .Forward = True
-            .Wrap = 0
-            .MatchCase = True
-            .MatchWholeWord = False
-            .Execute Replace:=2
-        End With
-    Next i
+    ' 1. In all non-footnote rows (Title, Header, and Body rows), ensure there is always a single space
+    '    before any bracketed footnote callout (e.g. "Week 28[b]" or "Week 28 [b]" -> "Week 28 [b]"),
+    '    so the resulting superscript always has a space before the letter ("Week 28 ᵇ").
+    If tbl.Rows.Count >= 2 Then
+        On Error Resume Next
+        Set nonFnRange = tbl.Range.Document.Range(tbl.Rows(1).Range.Start, tbl.Rows(tbl.Rows.Count - 1).Range.End)
+        On Error GoTo 0
+        If Not nonFnRange Is Nothing Then
+            For i = 1 To 9
+                numStr = "[" & CStr(i) & "]"
+                EnsureSpaceBeforeCalloutInRange nonFnRange, numStr
+            Next i
+            For i = 1 To 26
+                numStr = "[" & Chr(96 + i) & "]"
+                EnsureSpaceBeforeCalloutInRange nonFnRange, numStr
+            Next i
+        End If
+    End If
     
-    ' 2. Convert remaining numeric bracket callouts "[1]".."[9]" -> "a".."i" (superscript)
+    ' 2. Convert numeric bracket callouts "[1]".."[9]" -> "a".."i" (superscript, preserving any preceding space)
     For i = 1 To 9
         numStr = "[" & CStr(i) & "]"
         letStr = Chr(96 + i)
@@ -1190,27 +1286,7 @@ Private Sub ConvertFootnoteCalloutsToSuperscriptLetters(ByVal tbl As Table)
         End With
     Next i
     
-    ' 3. Convert letter bracket callouts with leading space " [a]".." [z]" -> "a".."z" (superscript)
-    For i = 1 To 26
-        numStr = " [" & Chr(96 + i) & "]"
-        letStr = Chr(96 + i)
-        
-        Set r = tbl.Range
-        With r.Find
-            .ClearFormatting
-            .Replacement.ClearFormatting
-            .Text = numStr
-            .Replacement.Text = letStr
-            .Replacement.Font.Superscript = True
-            .Forward = True
-            .Wrap = 0
-            .MatchCase = True
-            .MatchWholeWord = False
-            .Execute Replace:=2
-        End With
-    Next i
-    
-    ' 4. Convert remaining letter bracket callouts "[a]".."[z]" -> "a".."z" (superscript)
+    ' 3. Convert letter bracket callouts "[a]".."[z]" -> "a".."z" (superscript, preserving any preceding space)
     For i = 1 To 26
         numStr = "[" & Chr(96 + i) & "]"
         letStr = Chr(96 + i)
@@ -1229,6 +1305,34 @@ Private Sub ConvertFootnoteCalloutsToSuperscriptLetters(ByVal tbl As Table)
             .Execute Replace:=2
         End With
     Next i
+End Sub
+
+Private Sub EnsureSpaceBeforeCalloutInRange(ByVal targetRange As Range, ByVal bracketToken As String)
+    Dim rSearch As Range
+    Dim prevChar As String
+    
+    Set rSearch = targetRange.Duplicate
+    With rSearch.Find
+        .ClearFormatting
+        .Text = bracketToken
+        .Forward = True
+        .Wrap = 0 ' wdFindStop
+        .MatchCase = True
+        .MatchWholeWord = False
+        
+        Do While .Execute
+            If rSearch.Start >= targetRange.End Then Exit Do
+            If rSearch.Start > targetRange.Start Then
+                prevChar = targetRange.Document.Range(rSearch.Start - 1, rSearch.Start).Text
+                If prevChar <> " " And prevChar <> Chr(160) And prevChar <> vbTab And _
+                   prevChar <> vbCr And prevChar <> vbLf And prevChar <> Chr(11) And prevChar <> Chr(7) Then
+                    rSearch.InsertBefore " "
+                End If
+            End If
+            rSearch.Collapse 0 ' wdCollapseEnd
+            If rSearch.Start >= targetRange.End Then Exit Do
+        Loop
+    End With
 End Sub
 
 Private Sub ColorCitationsInFootnotes(ByVal tbl As Table)
@@ -2175,8 +2279,12 @@ Public Function FormatRowStubSentenceCase(ByVal strStub As String) As String
         ch = Mid(s, i, 1)
         If IsDelimiterChar(ch) Then
             If Len(currToken) > 0 Then
-                res = res & FormatWordSentenceCase(currToken, Not firstWordDone)
-                If HasAlphaChar(currToken) Then firstWordDone = True
+                If IsNumberedDesignatorWord(currToken) And NextTokenStartsWithDigit(s, i) Then
+                    res = res & UCase(Left(currToken, 1)) & LCase(Mid(currToken, 2))
+                Else
+                    res = res & FormatWordSentenceCase(currToken, Not firstWordDone)
+                End If
+                If HasAlphaChar(currToken) Or HasDigits(currToken) Then firstWordDone = True
                 currToken = ""
             End If
             If ch >= "0" And ch <= "9" Then firstWordDone = True
@@ -2191,6 +2299,38 @@ Public Function FormatRowStubSentenceCase(ByVal strStub As String) As String
     End If
     
     FormatRowStubSentenceCase = res
+End Function
+
+Private Function IsNumberedDesignatorWord(ByVal w As String) As Boolean
+    Select Case LCase(w)
+        Case "week", "weeks", "day", "days", "cycle", "cycles", "month", "months", _
+             "visit", "visits", "grade", "grades", "part", "parts", "cohort", "cohorts", _
+             "phase", "phases", "stage", "stages", "group", "groups", "arm", "arms", "period", "periods"
+            IsNumberedDesignatorWord = True
+        Case Else
+            IsNumberedDesignatorWord = False
+    End Select
+End Function
+
+Private Function NextTokenStartsWithDigit(ByVal s As String, ByVal startPos As Long) As Boolean
+    Dim idx As Long
+    Dim ch As String
+    NextTokenStartsWithDigit = False
+    idx = startPos
+    Do While idx <= Len(s)
+        ch = Mid(s, idx, 1)
+        If ch = " " Or ch = Chr(160) Or ch = vbTab Then
+            idx = idx + 1
+        Else
+            Exit Do
+        End If
+    Loop
+    If idx <= Len(s) Then
+        ch = Mid(s, idx, 1)
+        If ch >= "0" And ch <= "9" Then
+            NextTokenStartsWithDigit = True
+        End If
+    End If
 End Function
 
 Private Function IsDelimiterChar(ByVal ch As String) As Boolean
@@ -2275,6 +2415,11 @@ Private Function FormatWordSentenceCase(ByVal w As String, ByVal isFirst As Bool
             FormatWordSentenceCase = w
             Exit Function
         End If
+        ' Preserve plural acronyms and mixed-case abbreviations with 2+ uppercase letters (e.g. TEAEs, SAEs, AEs, AESIs, NSAIDs)
+        If numUpper >= 2 And InStr(baseW, "-") = 0 Then
+            FormatWordSentenceCase = w
+            Exit Function
+        End If
         If Mid(baseW, 1, 1) >= "a" And Mid(baseW, 1, 1) <= "z" Then
             If numUpper > 0 Then
                 FormatWordSentenceCase = w
@@ -2307,6 +2452,8 @@ Private Function FormatWordSentenceCase(ByVal w As String, ByVal isFirst As Bool
                     newParts(pIdx) = pStr
                 ElseIf IsAllUpper(pStr) And Len(pStr) >= 2 Then
                     newParts(pIdx) = pStr
+                ElseIf HasMultipleUpperLetters(pStr) Then
+                    newParts(pIdx) = pStr
                 ElseIf HasDigits(pStr) Then
                     newParts(pIdx) = pStr
                 Else
@@ -2334,6 +2481,22 @@ Private Function FormatWordSentenceCase(ByVal w As String, ByVal isFirst As Bool
     Else
         FormatWordSentenceCase = LCase(w)
     End If
+End Function
+
+Private Function HasMultipleUpperLetters(ByVal s As String) As Boolean
+    Dim i As Long, ch As String, uCount As Long
+    uCount = 0
+    For i = 1 To Len(s)
+        ch = Mid(s, i, 1)
+        If ch >= "A" And ch <= "Z" Then
+            uCount = uCount + 1
+            If uCount >= 2 Then
+                HasMultipleUpperLetters = True
+                Exit Function
+            End If
+        End If
+    Next i
+    HasMultipleUpperLetters = False
 End Function
 
 Private Function IsAllUpper(ByVal s As String) As Boolean
@@ -2391,6 +2554,18 @@ End Function
 
 Private Function GetProperNoun(ByVal w As String) As String
     Select Case LCase(w)
+        Case "teae": GetProperNoun = "TEAE"
+        Case "teaes": GetProperNoun = "TEAEs"
+        Case "tesae": GetProperNoun = "TESAE"
+        Case "tesaes": GetProperNoun = "TESAEs"
+        Case "sae": GetProperNoun = "SAE"
+        Case "saes": GetProperNoun = "SAEs"
+        Case "ae": GetProperNoun = "AE"
+        Case "aes": GetProperNoun = "AEs"
+        Case "aesi": GetProperNoun = "AESI"
+        Case "aesis": GetProperNoun = "AESIs"
+        Case "imp": GetProperNoun = "IMP"
+        Case "imps": GetProperNoun = "IMPs"
         Case "fisher": GetProperNoun = "Fisher"
         Case "pearson": GetProperNoun = "Pearson"
         Case "spearman": GetProperNoun = "Spearman"
@@ -2694,7 +2869,7 @@ Private Sub PromptAndFilterSelectedTables(ByVal tablesToInsert As Collection)
                    "Enter filter threshold:"
     
     Dim filterInput As String
-    filterInput = Trim(InputBox(filterPrompt, "Long CSR Table Row Filter", ">0"))
+    filterInput = Trim(InputBox(filterPrompt, "Long CSR Table Row Filter", "0"))
     
     If Len(filterInput) = 0 Or filterInput = "0" Or UCase(filterInput) = "ALL" Or UCase(filterInput) = "NONE" Then
         Exit Sub
