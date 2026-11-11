@@ -2842,9 +2842,11 @@ End Function
 Private Sub PromptAndFilterSelectedTables(ByVal tablesToInsert As Collection)
     Dim tblDict As Variant
     Dim hasLongIncidenceTable As Boolean
+    Dim anyHasTotalCol As Boolean
     Dim maxRows As Long
     
     hasLongIncidenceTable = False
+    anyHasTotalCol = False
     maxRows = 0
     For Each tblDict In tablesToInsert
         If tblDict("BodyRows").Count >= 40 Then
@@ -2852,6 +2854,9 @@ Private Sub PromptAndFilterSelectedTables(ByVal tablesToInsert As Collection)
                 hasLongIncidenceTable = True
                 If tblDict("BodyRows").Count > maxRows Then
                     maxRows = tblDict("BodyRows").Count
+                End If
+                If TableHasTotalColumn(tblDict) Then
+                    anyHasTotalCol = True
                 End If
             End If
         End If
@@ -2864,9 +2869,14 @@ Private Sub PromptAndFilterSelectedTables(ByVal tablesToInsert As Collection)
                    "Choose a row filtering option (applied independently to each selected treatment/table):" & vbCrLf & _
                    "  - '0' or Blank : Keep all rows (no filtering)" & vbCrLf & _
                    "  - '>0' or '1'  : Remove rows with 0 across all columns/grades" & vbCrLf & _
-                   "  - 'n' (e.g. 2, 5) : Keep rows with >= n participants in any column/grade" & vbCrLf & _
-                   "  - 'x%' (e.g. 1%, 2%) : Keep rows with >= x% of participants in any column/grade" & vbCrLf & vbCrLf & _
-                   "Enter filter threshold:"
+                   "  - 'n' (e.g. 3, 5) : Keep rows with >= n participants" & vbCrLf & _
+                   "  - 'x%' (e.g. 1%, 2%) : Keep rows with >= x% of participants"
+    If anyHasTotalCol Then
+        filterPrompt = filterPrompt & vbCrLf & vbCrLf & _
+                       "(Note: A 'Total' column was detected. After entering a threshold, you can choose whether to " & _
+                       "apply it across individual treatment/subgroup columns excluding Total, or to the Total column only.)"
+    End If
+    filterPrompt = filterPrompt & vbCrLf & vbCrLf & "Enter filter threshold:"
     
     Dim filterInput As String
     filterInput = Trim(InputBox(filterPrompt, "Long CSR Table Row Filter", "0"))
@@ -2878,17 +2888,168 @@ Private Sub PromptAndFilterSelectedTables(ByVal tablesToInsert As Collection)
     Dim filterMode As String ' "GT_ZERO", "MIN_COUNT", "MIN_PCT"
     Dim minCount As Long
     Dim minPct As Double
+    Dim colScope As String   ' "NON_TOTAL", "TOTAL_ONLY", or "ALL"
     
-    ParseFilterThresholdInput filterInput, filterMode, minCount, minPct
+    ParseFilterThresholdInput filterInput, filterMode, minCount, minPct, colScope
     If Len(filterMode) = 0 Then Exit Sub
+    
+    ' If a Total column exists and the user did not explicitly type "total" or "group" in the input,
+    ' ask whether to apply the cutoff across individual subgroups (excluding Total) or to the Total column only.
+    If anyHasTotalCol And Len(colScope) = 0 Then
+        Dim cutoffDesc As String
+        If filterMode = "GT_ZERO" Then
+            cutoffDesc = ">=1 participant"
+        ElseIf filterMode = "MIN_COUNT" Then
+            cutoffDesc = ">=" & CStr(minCount) & " participants"
+        Else
+            cutoffDesc = ">=" & CStr(minPct) & "% of participants"
+        End If
+        
+        Dim scopeMsg As String
+        scopeMsg = "A 'Total' column was detected in this table." & vbCrLf & vbCrLf & _
+                   "How should the cutoff (" & cutoffDesc & ") be applied?" & vbCrLf & vbCrLf & _
+                   ChrW(8226) & " Click YES to filter by any individual Treatment/Subgroup column (EXCLUDING the Total column)" & vbCrLf & _
+                   "    -> Title: ""... (Occurring in " & Replace(cutoffDesc, ">=", ChrW(8805)) & " in Any Group)""" & vbCrLf & vbCrLf & _
+                   ChrW(8226) & " Click NO to filter using ONLY the Total column" & vbCrLf & _
+                   "    -> Title: ""... (Occurring in " & Replace(cutoffDesc, ">=", ChrW(8805)) & " in Total)"""
+        
+        Dim scopeResp As VbMsgBoxResult
+        scopeResp = MsgBox(scopeMsg, vbYesNoCancel + vbQuestion + vbDefaultButton1, "Total Column Detected - Select Filter Scope")
+        If scopeResp = vbCancel Then
+            Exit Sub
+        ElseIf scopeResp = vbNo Then
+            colScope = "TOTAL_ONLY"
+        Else
+            colScope = "NON_TOTAL"
+        End If
+    ElseIf Len(colScope) = 0 Then
+        colScope = "NON_TOTAL"
+    End If
     
     For Each tblDict In tablesToInsert
         If tblDict("BodyRows").Count >= 40 And IsIncidenceCountTable(tblDict) Then
-            ApplyHierarchyRowFilterToTable tblDict, filterMode, minCount, minPct
-            UpdateFilteredTableTitle tblDict, filterMode, minCount, minPct
+            ApplyHierarchyRowFilterToTable tblDict, filterMode, minCount, minPct, colScope
+            UpdateFilteredTableTitle tblDict, filterMode, minCount, minPct, colScope
         End If
     Next tblDict
 End Sub
+
+Private Function TableHasTotalColumn(ByVal tblDict As Object) As Boolean
+    Dim isTotalCol() As Boolean
+    Dim hasAnyTotal As Boolean
+    BuildTotalColumnMask tblDict, isTotalCol, hasAnyTotal
+    TableHasTotalColumn = hasAnyTotal
+End Function
+
+Private Sub BuildTotalColumnMask( _
+    ByVal tblDict As Object, _
+    ByRef outIsTotalCol() As Boolean, _
+    ByRef outHasAnyTotal As Boolean _
+)
+    Dim colCount As Long
+    Dim hVals As Variant
+    Dim r As Long, c As Long
+    Dim totalColCount As Long
+    Dim nonTotalColCount As Long
+    
+    outHasAnyTotal = False
+    On Error Resume Next
+    colCount = CLng(tblDict("ColCount"))
+    If colCount < 2 Then
+        ReDim outIsTotalCol(1 To 1)
+        On Error GoTo 0
+        Exit Sub
+    End If
+    
+    ReDim outIsTotalCol(1 To colCount)
+    hVals = tblDict("HeaderValues")
+    totalColCount = 0
+    nonTotalColCount = 0
+    
+    For c = 2 To colCount
+        outIsTotalCol(c) = False
+        For r = LBound(hVals, 1) To UBound(hVals, 1)
+            If IsHeaderCellTotalGroup(CStr(hVals(r, c))) Then
+                outIsTotalCol(c) = True
+                Exit For
+            End If
+        Next r
+        If outIsTotalCol(c) Then
+            totalColCount = totalColCount + 1
+        Else
+            nonTotalColCount = nonTotalColCount + 1
+        End If
+    Next c
+    On Error GoTo 0
+    
+    ' Only treat as having a Total column if there is at least 1 Total column and at least 1 non-Total subgroup column
+    If totalColCount >= 1 And nonTotalColCount >= 1 Then
+        outHasAnyTotal = True
+    Else
+        For c = 1 To colCount
+            outIsTotalCol(c) = False
+        Next c
+        outHasAnyTotal = False
+    End If
+End Sub
+
+Private Function IsHeaderCellTotalGroup(ByVal rawHdrText As String) As Boolean
+    Dim norm As String
+    Dim lines() As String
+    Dim i As Long
+    Dim ln As String
+    Dim openP As Long
+    
+    IsHeaderCellTotalGroup = False
+    If Len(Trim(rawHdrText)) = 0 Then Exit Function
+    
+    norm = Replace(Replace(rawHdrText, vbCrLf, Chr(11)), vbCr, Chr(11))
+    norm = Replace(norm, vbLf, Chr(11))
+    lines = Split(norm, Chr(11))
+    
+    For i = LBound(lines) To UBound(lines)
+        ln = LCase(Trim(lines(i)))
+        If Len(ln) > 0 Then
+            ' Ignore continuous/exposure metric headers such as "Total Participant Years at Risk"
+            If InStr(ln, "years") = 0 And InStr(ln, "exposure") = 0 And _
+               InStr(ln, "duration") = 0 And InStr(ln, "time") = 0 And _
+               InStr(ln, "rate") = 0 And InStr(ln, "score") = 0 Then
+                
+                ' Strip "(N=...)" or "(n=...)"
+                openP = InStr(ln, "(n=")
+                If openP = 0 Then openP = InStr(ln, "(n =")
+                If openP > 0 Then
+                    ln = Trim(Left(ln, openP - 1))
+                End If
+                
+                ' Strip trailing "n (%)" or "(%)"
+                If Right(ln, 5) = "n (%)" Then
+                    ln = Trim(Left(ln, Len(ln) - 5))
+                ElseIf Right(ln, 3) = "(%)" Then
+                    ln = Trim(Left(ln, Len(ln) - 3))
+                End If
+                
+                ' Strip trailing footnote callout "[a]".."[z]" or "[1]".."[9]"
+                If Len(ln) >= 3 Then
+                    If Right(ln, 1) = "]" And Mid(ln, Len(ln) - 2, 1) = "[" Then
+                        ln = Trim(Left(ln, Len(ln) - 3))
+                    End If
+                End If
+                
+                If Len(ln) > 0 Then
+                    If ln = "total" Or ln = "overall" Or ln = "combined" Or _
+                       ln = "all participants" Or ln = "all subjects" Or _
+                       ln = "total participants" Or ln = "total subjects" Or _
+                       Left(ln, 6) = "total " Or Right(ln, 6) = " total" Or _
+                       InStr(ln, " total ") > 0 Then
+                        IsHeaderCellTotalGroup = True
+                        Exit Function
+                    End If
+                End If
+            End If
+        End If
+    Next i
+End Function
 
 Private Function IsIncidenceCountTable(ByVal tblDict As Object) As Boolean
     Dim hVals As Variant
@@ -2935,14 +3096,35 @@ Private Sub ParseFilterThresholdInput( _
     ByVal rawInput As String, _
     ByRef outMode As String, _
     ByRef outMinCount As Long, _
-    ByRef outMinPct As Double _
+    ByRef outMinPct As Double, _
+    ByRef outColScope As String _
 )
     Dim s As String
+    Dim lowS As String
     outMode = ""
     outMinCount = 0
     outMinPct = 0#
+    outColScope = ""
     
     s = Trim(rawInput)
+    lowS = LCase(s)
+    
+    ' Check if user explicitly included "total" or "group"/"subgroup" in their input string (e.g. "3 total", "5% group")
+    If InStr(lowS, "total") > 0 Then
+        outColScope = "TOTAL_ONLY"
+        s = Replace(s, "total", "", 1, -1, vbTextCompare)
+        s = Replace(s, "only", "", 1, -1, vbTextCompare)
+        s = Replace(s, "in", "", 1, -1, vbTextCompare)
+    ElseIf InStr(lowS, "group") > 0 Or InStr(lowS, "subgroup") > 0 Then
+        outColScope = "NON_TOTAL"
+        s = Replace(s, "subgroups", "", 1, -1, vbTextCompare)
+        s = Replace(s, "subgroup", "", 1, -1, vbTextCompare)
+        s = Replace(s, "groups", "", 1, -1, vbTextCompare)
+        s = Replace(s, "group", "", 1, -1, vbTextCompare)
+        s = Replace(s, "any", "", 1, -1, vbTextCompare)
+        s = Replace(s, "in", "", 1, -1, vbTextCompare)
+    End If
+    
     s = Replace(s, ChrW(8805), "")
     s = Replace(s, ">=", "")
     s = Replace(s, "=>", "")
@@ -3004,18 +3186,23 @@ Private Sub ApplyHierarchyRowFilterToTable( _
     ByVal tblDict As Object, _
     ByVal filterMode As String, _
     ByVal minCount As Long, _
-    ByVal minPct As Double _
+    ByVal minPct As Double, _
+    ByVal colScope As String _
 )
     Dim srcRows As Collection
     Dim filteredRows As Collection
     Dim colCount As Long
     Dim totalRows As Long
     Dim i As Long, j As Long
+    Dim isTotalCol() As Boolean
+    Dim hasAnyTotalCol As Boolean
     
     Set srcRows = tblDict("BodyRows")
     colCount = CLng(tblDict("ColCount"))
     totalRows = srcRows.Count
     If totalRows = 0 Then Exit Sub
+    
+    BuildTotalColumnMask tblDict, isTotalCol, hasAnyTotalCol
     
     Set filteredRows = New Collection
     i = 1
@@ -3050,7 +3237,7 @@ Private Sub ApplyHierarchyRowFilterToTable( _
             
             If childrenIndices.Count = 0 Then
                 ' Standalone unindented row (e.g. 'Participants with any TEAE' or unindented SOC with 0s)
-                If RowMeetsThreshold(rData, colCount, filterMode, minCount, minPct) Then
+                If RowMeetsThreshold(rData, colCount, filterMode, minCount, minPct, colScope, isTotalCol, hasAnyTotalCol) Then
                     filteredRows.Add rItem
                 End If
             Else
@@ -3063,7 +3250,7 @@ Private Sub ApplyHierarchyRowFilterToTable( _
                     Dim cData As Variant
                     cItem = srcRows(CLng(cIdxVar))
                     cData = cItem(0)
-                    If RowMeetsThreshold(cData, colCount, filterMode, minCount, minPct) Then
+                    If RowMeetsThreshold(cData, colCount, filterMode, minCount, minPct, colScope, isTotalCol, hasAnyTotalCol) Then
                         keptChildren.Add cItem
                     End If
                 Next cIdxVar
@@ -3079,7 +3266,7 @@ Private Sub ApplyHierarchyRowFilterToTable( _
             i = j
         Else
             ' Fallback if an indented row appears without an unindented parent
-            If RowMeetsThreshold(rData, colCount, filterMode, minCount, minPct) Then
+            If RowMeetsThreshold(rData, colCount, filterMode, minCount, minPct, colScope, isTotalCol, hasAnyTotalCol) Then
                 filteredRows.Add rItem
             End If
             i = i + 1
@@ -3095,31 +3282,46 @@ Private Function RowMeetsThreshold( _
     ByVal colCount As Long, _
     ByVal filterMode As String, _
     ByVal minCount As Long, _
-    ByVal minPct As Double _
+    ByVal minPct As Double, _
+    ByVal colScope As String, _
+    ByRef isTotalCol() As Boolean, _
+    ByVal hasAnyTotalCol As Boolean _
 ) As Boolean
     Dim c As Long
+    Dim checkCol As Boolean
     Dim cellVal As String
     Dim nCount As Long
     Dim pctVal As Double
     
     RowMeetsThreshold = False
     For c = 2 To colCount
-        cellVal = Trim(CStr(rowData(c)))
-        ParseCountAndPercent cellVal, nCount, pctVal
-        If filterMode = "GT_ZERO" Then
-            If nCount >= 1 Or pctVal > 0# Then
-                RowMeetsThreshold = True
-                Exit Function
+        checkCol = True
+        If hasAnyTotalCol Then
+            If colScope = "NON_TOTAL" And isTotalCol(c) Then
+                checkCol = False
+            ElseIf colScope = "TOTAL_ONLY" And Not isTotalCol(c) Then
+                checkCol = False
             End If
-        ElseIf filterMode = "MIN_COUNT" Then
-            If nCount >= minCount Then
-                RowMeetsThreshold = True
-                Exit Function
-            End If
-        ElseIf filterMode = "MIN_PCT" Then
-            If nCount >= 1 And pctVal >= minPct Then
-                RowMeetsThreshold = True
-                Exit Function
+        End If
+        
+        If checkCol Then
+            cellVal = Trim(CStr(rowData(c)))
+            ParseCountAndPercent cellVal, nCount, pctVal
+            If filterMode = "GT_ZERO" Then
+                If nCount >= 1 Or pctVal > 0# Then
+                    RowMeetsThreshold = True
+                    Exit Function
+                End If
+            ElseIf filterMode = "MIN_COUNT" Then
+                If nCount >= minCount Then
+                    RowMeetsThreshold = True
+                    Exit Function
+                End If
+            ElseIf filterMode = "MIN_PCT" Then
+                If nCount >= 1 And pctVal >= minPct Then
+                    RowMeetsThreshold = True
+                    Exit Function
+                End If
             End If
         End If
     Next c
@@ -3170,12 +3372,14 @@ Private Sub UpdateFilteredTableTitle( _
     ByVal tblDict As Object, _
     ByVal filterMode As String, _
     ByVal minCount As Long, _
-    ByVal minPct As Double _
+    ByVal minPct As Double, _
+    ByVal colScope As String _
 )
     Dim baseT As String
     Dim subT As String
     Dim popT As String
     Dim hasGrades As Boolean
+    Dim hasTotalCol As Boolean
     Dim suffixUnit As String
     Dim filterClause As String
     Dim hVals As Variant
@@ -3190,6 +3394,8 @@ Private Sub UpdateFilteredTableTitle( _
             baseT = Trim(Left(baseT, Len(baseT) - Len(popT)))
         End If
     End If
+    
+    hasTotalCol = TableHasTotalColumn(tblDict)
     
     hasGrades = (InStr(1, baseT, "Grade", vbTextCompare) > 0)
     If Not hasGrades Then
@@ -3207,7 +3413,9 @@ Private Sub UpdateFilteredTableTitle( _
         On Error GoTo 0
     End If
     
-    If hasGrades Then
+    If hasTotalCol And colScope = "TOTAL_ONLY" Then
+        suffixUnit = " in Total"
+    ElseIf hasGrades Then
         suffixUnit = " in Any Grade"
     Else
         suffixUnit = " in Any Group"
