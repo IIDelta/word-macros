@@ -55,11 +55,13 @@ def build_dotm():
         except Exception as e:
             print(f"Could not check/unload existing add-ins: {e}")
 
+    doc = None
+    tmp_dotm_path = os.path.join(tempfile.gettempdir(), f"mwt_build_{os.getpid()}.dotm")
     try:
         print(f"Creating new base template at {dotm_path}...")
-        if os.path.exists(dotm_path):
+        if os.path.exists(tmp_dotm_path):
             try:
-                os.remove(dotm_path)
+                os.remove(tmp_dotm_path)
             except OSError:
                 pass
         
@@ -70,17 +72,22 @@ def build_dotm():
             pass
 
         doc = word.Documents.Add(Visible=False)
-        doc.SaveAs2(dotm_path, FileFormat=15)
+        doc.SaveAs2(tmp_dotm_path, FileFormat=15)
             
         vb_comp = doc.VBProject.VBComponents
         for comp in list(vb_comp):
-            if comp.Type == 1:
-                print(f"Removing old module {comp.Name}")
+            if comp.Type in (1, 3):
+                print(f"Removing old component {comp.Name}")
                 vb_comp.Remove(comp)
         
         for bas_file in glob.glob(os.path.join(src_dir, '*.bas')):
             print(f"Importing {os.path.basename(bas_file)}...")
             vb_comp.Import(bas_file)
+            
+        sys.path.insert(0, base_dir)
+        from src.forms.csr_userform import add_csr_table_userform
+        print("Building FrmCSRTable UserForm...")
+        add_csr_table_userform(vb_comp)
             
         # Embed Keyboard Shortcuts into the Add-in
         try:
@@ -96,11 +103,33 @@ def build_dotm():
         print("Saving document...")
         doc.Save()
         doc.Close()
+        doc = None
         del vb_comp
-        del doc
+
+        try:
+            shutil.copy2(tmp_dotm_path, dotm_path)
+        except PermissionError:
+            os.system("taskkill /F /IM WINWORD.EXE /T >nul 2>&1")
+            time.sleep(1)
+            shutil.copy2(tmp_dotm_path, dotm_path)
+        if os.path.exists(tmp_dotm_path):
+            try:
+                os.remove(tmp_dotm_path)
+            except OSError:
+                pass
         print("Build successful!")
     except Exception as e:
         err_msg = str(e)
+        if doc is not None:
+            try:
+                doc.Close(0)
+            except Exception:
+                pass
+        if os.path.exists(tmp_dotm_path):
+            try:
+                os.remove(tmp_dotm_path)
+            except OSError:
+                pass
         print(f"Build failed: {err_msg}")
         sys.exit(1)
     finally:

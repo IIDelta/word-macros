@@ -100,6 +100,9 @@ Public Sub ImportAndFormatCSRTable()
     End If
     Set targetDoc = ActiveDocument
     
+    ' Guard against nesting a new CSR table inside an existing table cell
+    If Not EnsureCursorOutsideExistingTable() Then Exit Sub
+    
     ' 1. Select RTF Output file (remembers last folder used in this Word session)
     Set fd = Application.FileDialog(1) ' 1 = msoFileDialogFilePicker
     With fd
@@ -485,28 +488,16 @@ Public Sub ImportAndFormatCSRTable()
         ptItem("OriginalRowCount") = ptItem("BodyRows").Count
     Next ptItem
     
-    ' 5. Prompt user if multiple distinct tables found (supports multi-select e.g. '5-8', 'Race', '2, 3, 4' or 'All')
+    ' 5. Show unified UserForm configuration & confirmation dialog (or fallback prompts if form unavailable)
     Dim tablesToInsert As Collection
-    Set tablesToInsert = New Collection
-    
-    If parsedTablesColl.Count = 1 Then
-        tablesToInsert.Add parsedTablesColl(1)
-    Else
-        Set tablesToInsert = PromptMultiTableSelection(parsedTablesColl)
-        If tablesToInsert.Count = 0 Then
-            Application.ScreenUpdating = True
-            Application.DisplayAlerts = -1
-            Exit Sub
-        End If
+    Set tablesToInsert = ShowCSRTableImportDialog(rtfPath, parsedTablesColl, defaultSourceNumber)
+    If tablesToInsert Is Nothing Then
+        Application.ScreenUpdating = True
+        Application.DisplayAlerts = -1
+        Application.StatusBar = False
+        Exit Sub
     End If
-    
-    ' 5b. Check if any selected table is a long incidence/grade table (> 40 rows) and offer threshold filtering
-    PromptAndFilterSelectedTables tablesToInsert
-    
-    ' 5c. Pre-Insertion Confirmation Step:
-    '     Displays the exact table title(s) to be inserted, data row count, estimated CSR page length,
-    '     orientation, and estimated insertion time, allowing the writer to Cancel before modifying the CSR.
-    If Not ConfirmTableInsertionWithUser(rtfPath, tablesToInsert, defaultSourceNumber) Then
+    If tablesToInsert.Count = 0 Then
         Application.ScreenUpdating = True
         Application.DisplayAlerts = -1
         Application.StatusBar = False
@@ -526,6 +517,7 @@ Public Sub ImportAndFormatCSRTable()
     Set targetRange = Selection.Range
     Dim insTbl As Variant
     Dim lastTbl As Table
+    Dim firstInsertedTbl As Table
     Dim insertCount As Long: insertCount = 0
     Dim totalToInsert As Long: totalToInsert = tablesToInsert.Count
     
@@ -542,6 +534,7 @@ Public Sub ImportAndFormatCSRTable()
         
         Set lastTbl = InsertSingleCSRTable(targetDoc, targetRange, insTbl, defaultSourceNumber, hfFootnotes)
         insertCount = insertCount + 1
+        If insertCount = 1 Then Set firstInsertedTbl = lastTbl
         
         Set targetRange = lastTbl.Range
         targetRange.Collapse 0 ' wdCollapseEnd
@@ -554,19 +547,26 @@ Public Sub ImportAndFormatCSRTable()
         On Error GoTo ErrorHandler
     End If
     
-    Application.StatusBar = False
+    On Error Resume Next
+    If Not lastTbl Is Nothing Then
+        Set targetRange = lastTbl.Range
+        targetRange.Collapse 0 ' wdCollapseEnd
+        targetRange.Select
+    End If
+    If Not firstInsertedTbl Is Nothing Then
+        ActiveWindow.ScrollIntoView firstInsertedTbl.Rows(1).Range, True
+    End If
+    Err.Clear
+    On Error GoTo ErrorHandler
+    
     Application.ScreenUpdating = True
     Application.DisplayAlerts = -1
     
     If insertCount = 1 Then
         Dim sTbl As Object: Set sTbl = tablesToInsert(1)
-        MsgBox "Table imported and Takeda CSR formatting successfully applied!" & vbCrLf & _
-               "Title: " & sTbl("FullTitle") & vbCrLf & _
-               "Columns: " & sTbl("ColCount") & " | Data Rows: " & sTbl("BodyRows").Count & vbCrLf & _
-               "(Tip: Press Ctrl+Z once to undo the entire table insertion if needed.)", vbInformation, "Takeda CSR Tools"
+        Application.StatusBar = "Takeda CSR Tools: Inserted '" & Left(CStr(sTbl("FullTitle")), 70) & "' (" & sTbl("BodyRows").Count & " rows, " & sTbl("ColCount") & " cols). Press Ctrl+Z to undo."
     Else
-        MsgBox "Successfully imported and formatted " & insertCount & " CSR tables!" & vbCrLf & _
-               "(Tip: Press Ctrl+Z once to undo the entire table insertion if needed.)", vbInformation, "Takeda CSR Tools"
+        Application.StatusBar = "Takeda CSR Tools: Successfully inserted " & insertCount & " CSR tables. Press Ctrl+Z to undo."
     End If
     Exit Sub
     
@@ -2801,23 +2801,30 @@ Private Function PromptMultiTableSelection(ByVal allTables As Collection) As Col
         End If
     End If
     
-    userChoice = Trim(InputBox(promptMsg, "Select CSR Table(s) to Insert", "All"))
-    If Len(userChoice) = 0 Then
-        Set PromptMultiTableSelection = res
-        Exit Function
-    End If
-    
-    combineDirective = ExtractCombineDirective(userChoice, cleanedChoice)
-    If Len(cleanedChoice) = 0 And Len(combineDirective) > 0 Then
-        cleanedChoice = "All"
-    End If
-    
-    Set res = ParseMultiTableSelection(cleanedChoice, allTables)
-    If res.Count = 0 Then
-        MsgBox "Invalid table selection: '" & userChoice & "'.", vbExclamation, "Takeda CSR Tools"
-        Set PromptMultiTableSelection = res
-        Exit Function
-    End If
+    Dim defaultChoice As String
+    defaultChoice = "All"
+    Do
+        userChoice = Trim(InputBox(promptMsg, "Select CSR Table(s) to Insert", defaultChoice))
+        If Len(userChoice) = 0 Then
+            Set PromptMultiTableSelection = New Collection
+            Exit Function
+        End If
+        
+        combineDirective = ExtractCombineDirective(userChoice, cleanedChoice)
+        If Len(cleanedChoice) = 0 And Len(combineDirective) > 0 Then
+            cleanedChoice = "All"
+        End If
+        
+        Set res = ParseMultiTableSelection(cleanedChoice, allTables)
+        If res.Count > 0 Then
+            Exit Do
+        End If
+        
+        MsgBox "Could not match '" & userChoice & "' to any panel number (1-" & totalCount & "), range, or panel keyword." & vbCrLf & vbCrLf & _
+               "Valid examples: 'All', 'Combine', '1', '1-5', '1-2, 5-8', or a panel keyword.", _
+               vbExclamation, "Invalid Table Selection - Please Try Again"
+        defaultChoice = userChoice
+    Loop
     
     If res.Count >= 2 And CanCombineSubtables(res) Then
         Dim doCombine As Boolean
@@ -2827,8 +2834,15 @@ Private Function PromptMultiTableSelection(ByVal allTables As Collection) As Col
         ElseIf combineDirective = "SEPARATE" Then
             doCombine = False
         Else
+            Dim commonPrefPrev As String
+            commonPrefPrev = ExtractCommonSubtitlePrefix(res)
+            Dim panelEx As String
+            panelEx = "'" & ExtractPanelParentLabel(res(1), commonPrefPrev, 1) & "', '" & _
+                      ExtractPanelParentLabel(res(2), commonPrefPrev, 2) & "'"
+            If res.Count > 2 Then panelEx = panelEx & ", ..."
+            
             Dim combineMsg As String
-            combineMsg = "You selected " & res.Count & " subtables/panels." & vbCrLf & vbCrLf & _
+            combineMsg = "You selected " & res.Count & " subtables/panels (e.g., " & panelEx & ")." & vbCrLf & vbCrLf & _
                          "How would you like to insert them?" & vbCrLf & vbCrLf & _
                          ChrW(8226) & " Click YES to COMBINE all " & res.Count & " panels into ONE single CSR table" & vbCrLf & _
                          "    (Each panel identifier becomes a parent row above its associated data rows)" & vbCrLf & vbCrLf & _
@@ -3240,19 +3254,33 @@ Private Sub PromptAndFilterSelectedTables(ByVal tablesToInsert As Collection)
     filterPrompt = filterPrompt & vbCrLf & vbCrLf & "Enter filter threshold:"
     
     Dim filterInput As String
-    filterInput = Trim(InputBox(filterPrompt, "Long CSR Table Row Filter", "0"))
-    
-    If Len(filterInput) = 0 Or filterInput = "0" Or UCase(filterInput) = "ALL" Or UCase(filterInput) = "NONE" Then
-        Exit Sub
-    End If
-    
+    Dim defaultFilter As String
     Dim filterMode As String ' "GT_ZERO", "MIN_COUNT", "MIN_PCT"
     Dim minCount As Long
     Dim minPct As Double
     Dim colScope As String   ' "NON_TOTAL", "TOTAL_ONLY", or "ALL"
     
-    ParseFilterThresholdInput filterInput, filterMode, minCount, minPct, colScope
-    If Len(filterMode) = 0 Then Exit Sub
+    defaultFilter = "0"
+    Do
+        filterInput = Trim(InputBox(filterPrompt, "Long CSR Table Row Filter", defaultFilter))
+        If Len(filterInput) = 0 Or filterInput = "0" Or UCase(filterInput) = "ALL" Or UCase(filterInput) = "NONE" Then
+            Exit Sub
+        End If
+        
+        ParseFilterThresholdInput filterInput, filterMode, minCount, minPct, colScope
+        If Len(filterMode) > 0 Then
+            Exit Do
+        End If
+        
+        MsgBox "Could not recognize filter threshold: '" & filterInput & "'." & vbCrLf & vbCrLf & _
+               "Valid examples:" & vbCrLf & _
+               "  - '0' (keep all rows)" & vbCrLf & _
+               "  - '>0' or '1' (remove all-zero rows)" & vbCrLf & _
+               "  - '3' or '>=5' (minimum participant count)" & vbCrLf & _
+               "  - '2%' or '>=5%' (minimum percentage)", _
+               vbExclamation, "Invalid Filter Threshold - Please Try Again"
+        defaultFilter = filterInput
+    Loop
     
     ' If a Total column exists and the user did not explicitly type "total" or "group" in the input,
     ' ask whether to apply the cutoff across individual subgroups (excluding Total) or to the Total column only.
@@ -3485,6 +3513,17 @@ Private Sub ParseFilterThresholdInput( _
         s = Replace(s, "any", "", 1, -1, vbTextCompare)
         s = Replace(s, "in", "", 1, -1, vbTextCompare)
     End If
+    
+    s = Replace(s, "participants", "", 1, -1, vbTextCompare)
+    s = Replace(s, "participant", "", 1, -1, vbTextCompare)
+    s = Replace(s, "subjects", "", 1, -1, vbTextCompare)
+    s = Replace(s, "subject", "", 1, -1, vbTextCompare)
+    s = Replace(s, "patients", "", 1, -1, vbTextCompare)
+    s = Replace(s, "patient", "", 1, -1, vbTextCompare)
+    s = Replace(s, "percent", "%", 1, -1, vbTextCompare)
+    s = Replace(s, "pct", "%", 1, -1, vbTextCompare)
+    s = Replace(s, "of", "", 1, -1, vbTextCompare)
+    s = Replace(s, " %", "%")
     
     s = Replace(s, ChrW(8805), "")
     s = Replace(s, ">=", "")
@@ -4285,11 +4324,18 @@ Private Function ConfirmTableInsertionWithUser( _
     If estSecLow < 1 Then estSecLow = 1
     estSecHigh = CLng(estSecLow * 1.6) + 1
     
+    Dim colPreview As String
+    colPreview = BuildColumnHeadersPreview(firstTbl)
+    
     Dim msg As String
     msg = "Ready to insert into CSR document:" & vbCrLf & vbCrLf & _
           "File: " & ExtractFileName(rtfPath) & vbCrLf & _
           "Source: " & srcNum & vbCrLf & _
-          "Title: " & titleSummary & vbCrLf & vbCrLf & _
+          "Title: " & titleSummary & vbCrLf
+    If Len(colPreview) > 0 Then
+        msg = msg & "Data Columns: " & colPreview & vbCrLf
+    End If
+    msg = msg & vbCrLf & _
           "Table Size: " & rowsSummary & vbCrLf & _
           "Estimated CSR Length: ~" & totalEstPages & " page(s) (" & orientLabel & ")" & vbCrLf & _
           "Estimated Insertion Time: " & FormatEstimatedSeconds(estSecLow, estSecHigh)
@@ -4310,6 +4356,94 @@ Private Function ConfirmTableInsertionWithUser( _
     If choice <> vbOK Then
         ConfirmTableInsertionWithUser = False
     End If
+End Function
+
+Private Function EnsureCursorOutsideExistingTable() As Boolean
+    Dim curTbl As Table
+    Dim rAfter As Range
+    Dim resp As VbMsgBoxResult
+    
+    EnsureCursorOutsideExistingTable = True
+    On Error Resume Next
+    If Selection.Information(12) Then ' 12 = wdWithInTable
+        resp = MsgBox("Your cursor is currently inside an existing table." & vbCrLf & vbCrLf & _
+                      ChrW(8226) & " Click OK to automatically move the cursor below the current table and insert there." & vbCrLf & _
+                      ChrW(8226) & " Click Cancel to abort and place the cursor manually.", _
+                      vbOKCancel + vbInformation, "Cursor Inside Existing Table")
+        If resp <> vbOK Then
+            EnsureCursorOutsideExistingTable = False
+            On Error GoTo 0
+            Exit Function
+        End If
+        
+        If Selection.Tables.Count > 0 Then
+            Set curTbl = Selection.Tables(1)
+            Set rAfter = curTbl.Range
+            rAfter.Collapse 0 ' wdCollapseEnd
+            If rAfter.Information(12) Then
+                rAfter.InsertParagraphAfter
+                rAfter.Collapse 0
+            End If
+            rAfter.Select
+        End If
+    End If
+    Err.Clear
+    On Error GoTo 0
+End Function
+
+Private Function BuildColumnHeadersPreview(ByVal tblDict As Object) As String
+    Dim hVals As Variant
+    Dim colCount As Long
+    Dim numHdrRows As Long
+    Dim c As Long, r As Long
+    Dim maxCols As Long
+    Dim previewStr As String
+    Dim colLbl As String
+    Dim partTxt As String
+    Dim lowPart As String
+    
+    BuildColumnHeadersPreview = ""
+    On Error Resume Next
+    colCount = CLng(tblDict("ColCount"))
+    numHdrRows = CLng(tblDict("NumHeaderRows"))
+    hVals = tblDict("HeaderValues")
+    If Err.Number <> 0 Or colCount < 2 Then
+        Err.Clear
+        On Error GoTo 0
+        Exit Function
+    End If
+    On Error GoTo 0
+    
+    maxCols = colCount
+    If maxCols > 7 Then maxCols = 7 ' Column 1 is stub + up to 6 data columns
+    
+    previewStr = ""
+    For c = 2 To maxCols
+        colLbl = ""
+        For r = 1 To numHdrRows
+            partTxt = Replace(Trim(CStr(hVals(r, c))), Chr(11), " ")
+            Do While InStr(partTxt, "  ") > 0
+                partTxt = Replace(partTxt, "  ", " ")
+            Loop
+            lowPart = LCase(partTxt)
+            If Len(partTxt) > 0 And lowPart <> "n (%)" And lowPart <> "(%)" Then
+                If Len(colLbl) = 0 Then
+                    colLbl = partTxt
+                ElseIf InStr(1, colLbl, partTxt, vbTextCompare) = 0 Then
+                    colLbl = colLbl & " " & partTxt
+                End If
+            End If
+        Next r
+        If Len(colLbl) = 0 Then colLbl = "Col " & c
+        If Len(colLbl) > 28 Then colLbl = Left(colLbl, 26) & ".."
+        If Len(previewStr) > 0 Then previewStr = previewStr & " | "
+        previewStr = previewStr & colLbl
+    Next c
+    
+    If colCount > maxCols Then
+        previewStr = previewStr & " | ...(+" & (colCount - maxCols) & " more)"
+    End If
+    BuildColumnHeadersPreview = previewStr
 End Function
 
 Private Function EstimateCSROutputPages(ByVal dataRows As Long, ByVal headerRows As Long, ByVal isLandscape As Boolean) As Long
@@ -4338,6 +4472,449 @@ Private Function FormatEstimatedSeconds(ByVal secLow As Long, ByVal secHigh As L
         If minLow < 1 Then minLow = 1
         FormatEstimatedSeconds = "~" & minLow & "-" & minHigh & " minute(s)"
     End If
+End Function
+
+' ==============================================================================
+' UNIFIED USERFORM DIALOG LAUNCHER & PUBLIC API FOR FrmCSRTable
+' ==============================================================================
+
+Private Function ShowCSRTableImportDialog( _
+    ByVal rtfPath As String, _
+    ByVal allTables As Collection, _
+    ByVal defaultSourceNumber As String _
+) As Collection
+    Dim frm As Object
+    Dim formLoaded As Boolean
+    
+    Set ShowCSRTableImportDialog = New Collection
+    formLoaded = False
+    
+    On Error Resume Next
+    Set frm = VBA.UserForms.Add("FrmCSRTable")
+    If Err.Number = 0 And Not frm Is Nothing Then
+        formLoaded = True
+    Else
+        Err.Clear
+    End If
+    On Error GoTo 0
+    
+    If formLoaded Then
+        Application.ScreenUpdating = True
+        Application.DisplayAlerts = -1
+        
+        frm.InitializeDialog rtfPath, allTables, defaultSourceNumber
+        frm.Show
+        
+        If Not frm.Cancelled Then
+            Set ShowCSRTableImportDialog = frm.ResultTables
+        Else
+            Set ShowCSRTableImportDialog = Nothing
+        End If
+        
+        On Error Resume Next
+        Unload frm
+        Set frm = Nothing
+        Err.Clear
+        On Error GoTo 0
+        
+        Application.ScreenUpdating = False
+        Application.DisplayAlerts = 0 ' wdAlertsNone
+        Exit Function
+    End If
+    
+    ' Fallback path if standalone .bas is run without FrmCSRTable in the host template
+    Dim tablesToInsert As Collection
+    Set tablesToInsert = New Collection
+    If allTables.Count = 1 Then
+        tablesToInsert.Add CloneTableDict(allTables(1))
+    Else
+        Set tablesToInsert = PromptMultiTableSelection(allTables)
+        If tablesToInsert.Count = 0 Then
+            Set ShowCSRTableImportDialog = Nothing
+            Exit Function
+        End If
+    End If
+    
+    PromptAndFilterSelectedTables tablesToInsert
+    If Not ConfirmTableInsertionWithUser(rtfPath, tablesToInsert, defaultSourceNumber) Then
+        Set ShowCSRTableImportDialog = Nothing
+        Exit Function
+    End If
+    Set ShowCSRTableImportDialog = tablesToInsert
+End Function
+
+Public Function CSR_CanCombineTables(ByVal tablesColl As Collection) As Boolean
+    CSR_CanCombineTables = CanCombineSubtables(tablesColl)
+End Function
+
+Public Function CSR_AnyTableIsIncidence(ByVal tablesColl As Collection) As Boolean
+    Dim item As Variant
+    CSR_AnyTableIsIncidence = False
+    If tablesColl Is Nothing Then Exit Function
+    For Each item In tablesColl
+        If IsIncidenceCountTable(item) Then
+            CSR_AnyTableIsIncidence = True
+            Exit Function
+        End If
+    Next item
+End Function
+
+Public Function CSR_AnyTableHasTotalCol(ByVal tablesColl As Collection) As Boolean
+    Dim item As Variant
+    CSR_AnyTableHasTotalCol = False
+    If tablesColl Is Nothing Then Exit Function
+    For Each item In tablesColl
+        If TableHasTotalColumn(item) Then
+            CSR_AnyTableHasTotalCol = True
+            Exit Function
+        End If
+    Next item
+End Function
+
+Public Function CSR_GetPanelDisplayLabel(ByVal tblDict As Object, ByVal idx As Long) As String
+    Dim subStr As String
+    Dim titleStr As String
+    Dim rowCnt As Long
+    
+    subStr = SanitizeInputBoxText(Trim(CStr(tblDict("Subtitle"))))
+    rowCnt = tblDict("BodyRows").Count
+    If Len(subStr) > 0 Then
+        CSR_GetPanelDisplayLabel = CStr(idx) & ". " & subStr & "  [" & rowCnt & " rows]"
+    Else
+        titleStr = SanitizeInputBoxText(Trim(CStr(tblDict("FullTitle"))))
+        If Len(titleStr) > 72 Then titleStr = Left(titleStr, 69) & "..."
+        CSR_GetPanelDisplayLabel = CStr(idx) & ". " & titleStr & "  [" & rowCnt & " rows]"
+    End If
+End Function
+
+Public Function CSR_GetColumnDisplayLabel(ByVal tblDict As Object, ByVal colIdx As Long) As String
+    Dim hVals As Variant
+    Dim numHdrRows As Long
+    Dim r As Long
+    Dim colLbl As String
+    Dim unitLbl As String
+    Dim partTxt As String
+    Dim lowPart As String
+    
+    CSR_GetColumnDisplayLabel = "Column " & colIdx
+    On Error Resume Next
+    numHdrRows = CLng(tblDict("NumHeaderRows"))
+    hVals = tblDict("HeaderValues")
+    If Err.Number <> 0 Then
+        Err.Clear
+        On Error GoTo 0
+        Exit Function
+    End If
+    On Error GoTo 0
+    
+    colLbl = ""
+    unitLbl = ""
+    For r = 1 To numHdrRows
+        partTxt = Replace(Trim(CStr(hVals(r, colIdx))), Chr(11), " ")
+        Do While InStr(partTxt, "  ") > 0
+            partTxt = Replace(partTxt, "  ", " ")
+        Loop
+        lowPart = LCase(partTxt)
+        If Len(partTxt) > 0 Then
+            If lowPart = "n (%)" Or lowPart = "(%)" Then
+                unitLbl = partTxt
+            ElseIf Len(colLbl) = 0 Then
+                colLbl = partTxt
+            ElseIf InStr(1, colLbl, partTxt, vbTextCompare) = 0 Then
+                colLbl = colLbl & " " & partTxt
+            End If
+        End If
+    Next r
+    If Len(colLbl) = 0 Then colLbl = "Column " & colIdx
+    If Len(unitLbl) > 0 And InStr(1, colLbl, unitLbl, vbTextCompare) = 0 Then
+        colLbl = colLbl & " [" & unitLbl & "]"
+    End If
+    CSR_GetColumnDisplayLabel = SanitizeInputBoxText(colLbl)
+End Function
+
+Public Function CSR_ExtractFileName(ByVal fullPath As String) As String
+    CSR_ExtractFileName = ExtractFileName(fullPath)
+End Function
+
+Private Function CloneTableDict(ByVal srcDict As Object) As Object
+    Dim d As Object
+    Dim colCount As Long, numHdrRows As Long
+    Dim r As Long, c As Long
+    Dim srcH As Variant, dstH() As String
+    Dim srcRows As Collection, dstRows As Collection
+    Dim rItem As Variant, origData As Variant, origInds As Variant
+    Dim srcFn As Collection, dstFn As Collection, fnItem As Variant
+    
+    Set d = CreateObject("Scripting.Dictionary")
+    d("TableIndex") = srcDict("TableIndex")
+    d("SourceNumber") = CStr(srcDict("SourceNumber"))
+    d("Title") = CStr(srcDict("Title"))
+    d("Subtitle") = CStr(srcDict("Subtitle"))
+    d("Population") = CStr(srcDict("Population"))
+    d("FullTitle") = CStr(srcDict("FullTitle"))
+    colCount = CLng(srcDict("ColCount"))
+    numHdrRows = CLng(srcDict("NumHeaderRows"))
+    d("ColCount") = colCount
+    d("NumHeaderRows") = numHdrRows
+    d("TotalWidthPts") = CSng(srcDict("TotalWidthPts"))
+    If srcDict.Exists("OriginalRowCount") Then
+        d("OriginalRowCount") = CLng(srcDict("OriginalRowCount"))
+    Else
+        d("OriginalRowCount") = srcDict("BodyRows").Count
+    End If
+    
+    srcH = srcDict("HeaderValues")
+    ReDim dstH(1 To numHdrRows, 1 To colCount)
+    For r = 1 To numHdrRows
+        For c = 1 To colCount
+            dstH(r, c) = CStr(srcH(r, c))
+        Next c
+    Next r
+    d("HeaderValues") = dstH
+    
+    Set srcRows = srcDict("BodyRows")
+    Set dstRows = New Collection
+    For Each rItem In srcRows
+        origData = rItem(0)
+        origInds = rItem(1)
+        Dim rowD() As String
+        Dim rowI() As Single
+        ReDim rowD(1 To colCount)
+        ReDim rowI(1 To colCount)
+        For c = 1 To colCount
+            rowD(c) = CStr(origData(c))
+            rowI(c) = CSng(origInds(c))
+        Next c
+        dstRows.Add Array(rowD, rowI)
+    Next rItem
+    Set d("BodyRows") = dstRows
+    
+    Set dstFn = New Collection
+    If srcDict.Exists("Footnotes") Then
+        Set srcFn = srcDict("Footnotes")
+        For Each fnItem In srcFn
+            dstFn.Add CStr(fnItem)
+        Next fnItem
+    End If
+    Set d("Footnotes") = dstFn
+    
+    Set CloneTableDict = d
+End Function
+
+Private Sub ApplyColumnSelectionToTable(ByVal tblDict As Object, ByVal selectedDataCols As Collection)
+    Dim origColCount As Long
+    Dim newColCount As Long
+    Dim numHdrRows As Long
+    Dim keepCols() As Long
+    Dim idx As Long, k As Long, r As Long, c As Long
+    Dim srcH As Variant, newH() As String
+    Dim srcRows As Collection, newRows As Collection
+    Dim rItem As Variant, origData As Variant, origInds As Variant
+    Dim origWidth As Single
+    
+    origColCount = CLng(tblDict("ColCount"))
+    If selectedDataCols Is Nothing Then Exit Sub
+    If selectedDataCols.Count = 0 Then Exit Sub
+    
+    newColCount = 1 + selectedDataCols.Count
+    If newColCount >= origColCount Then Exit Sub
+    
+    ReDim keepCols(1 To newColCount)
+    keepCols(1) = 1
+    k = 1
+    For idx = 1 To selectedDataCols.Count
+        c = CLng(selectedDataCols(idx))
+        If c >= 2 And c <= origColCount Then
+            k = k + 1
+            keepCols(k) = c
+        End If
+    Next idx
+    newColCount = k
+    If newColCount < 2 Or newColCount >= origColCount Then Exit Sub
+    
+    numHdrRows = CLng(tblDict("NumHeaderRows"))
+    srcH = tblDict("HeaderValues")
+    ReDim newH(1 To numHdrRows, 1 To newColCount)
+    For r = 1 To numHdrRows
+        For c = 1 To newColCount
+            newH(r, c) = CStr(srcH(r, keepCols(c)))
+        Next c
+    Next r
+    tblDict("HeaderValues") = newH
+    
+    Set srcRows = tblDict("BodyRows")
+    Set newRows = New Collection
+    For Each rItem In srcRows
+        origData = rItem(0)
+        origInds = rItem(1)
+        Dim rowD() As String
+        Dim rowI() As Single
+        ReDim rowD(1 To newColCount)
+        ReDim rowI(1 To newColCount)
+        For c = 1 To newColCount
+            rowD(c) = CStr(origData(keepCols(c)))
+            rowI(c) = CSng(origInds(keepCols(c)))
+        Next c
+        newRows.Add Array(rowD, rowI)
+    Next rItem
+    tblDict.Remove "BodyRows"
+    Set tblDict("BodyRows") = newRows
+    
+    origWidth = CSng(tblDict("TotalWidthPts"))
+    If origColCount > 0 And origWidth > 0# Then
+        tblDict("TotalWidthPts") = origWidth * (CSng(newColCount) / CSng(origColCount))
+    End If
+    tblDict("ColCount") = newColCount
+End Sub
+
+Public Function CSR_BuildConfiguredTables( _
+    ByVal allTables As Collection, _
+    ByVal selectedPanelIndices As Collection, _
+    ByVal combinePanels As Boolean, _
+    ByVal selectedDataCols As Collection, _
+    ByVal filterMode As String, _
+    ByVal minCount As Long, _
+    ByVal minPct As Double, _
+    ByVal colScope As String _
+) As Collection
+    Dim selectedClones As Collection
+    Dim workingTables As Collection
+    Dim pIdxVar As Variant
+    Dim pIdx As Long
+    Dim tblDict As Object
+    Dim refColCount As Long
+    
+    Set CSR_BuildConfiguredTables = New Collection
+    If allTables Is Nothing Then Exit Function
+    If allTables.Count = 0 Then Exit Function
+    If selectedPanelIndices Is Nothing Then Exit Function
+    If selectedPanelIndices.Count = 0 Then Exit Function
+    
+    refColCount = CLng(allTables(1)("ColCount"))
+    
+    Set selectedClones = New Collection
+    For Each pIdxVar In selectedPanelIndices
+        pIdx = CLng(pIdxVar)
+        If pIdx >= 1 And pIdx <= allTables.Count Then
+            selectedClones.Add CloneTableDict(allTables(pIdx))
+        End If
+    Next pIdxVar
+    If selectedClones.Count = 0 Then Exit Function
+    
+    If combinePanels And selectedClones.Count >= 2 And CanCombineSubtables(selectedClones) Then
+        Set workingTables = New Collection
+        workingTables.Add CombineSubtablesIntoSingleTable(selectedClones)
+    Else
+        Set workingTables = selectedClones
+    End If
+    
+    For Each tblDict In workingTables
+        Dim doFilter As Boolean
+        doFilter = (Len(filterMode) > 0 And IsIncidenceCountTable(tblDict))
+        
+        If doFilter And colScope = "TOTAL_ONLY" Then
+            ApplyHierarchyRowFilterToTable tblDict, filterMode, minCount, minPct, colScope
+            UpdateFilteredTableTitle tblDict, filterMode, minCount, minPct, colScope
+        End If
+        
+        If Not selectedDataCols Is Nothing Then
+            If selectedDataCols.Count > 0 And CLng(tblDict("ColCount")) = refColCount And selectedDataCols.Count < (refColCount - 1) Then
+                ApplyColumnSelectionToTable tblDict, selectedDataCols
+            End If
+        End If
+        
+        If doFilter And colScope <> "TOTAL_ONLY" Then
+            ApplyHierarchyRowFilterToTable tblDict, filterMode, minCount, minPct, colScope
+            UpdateFilteredTableTitle tblDict, filterMode, minCount, minPct, colScope
+        End If
+    Next tblDict
+    
+    Set CSR_BuildConfiguredTables = workingTables
+End Function
+
+Public Function CSR_FormatPreviewSummary(ByVal configuredTables As Collection, ByRef outTitlePreview As String) As String
+    Dim tblCount As Long
+    Dim totalDataRows As Long
+    Dim totalOrigRows As Long
+    Dim totalCells As Long
+    Dim totalEstPages As Long
+    Dim anyLandscape As Boolean
+    Dim anyPortrait As Boolean
+    Dim firstTbl As Object
+    Dim tItem As Variant
+    Dim tObj As Object
+    
+    outTitlePreview = ""
+    If configuredTables Is Nothing Then
+        CSR_FormatPreviewSummary = "Select at least 1 panel and 1 data column."
+        Exit Function
+    End If
+    tblCount = configuredTables.Count
+    If tblCount = 0 Then
+        CSR_FormatPreviewSummary = "Select at least 1 panel and 1 data column."
+        Exit Function
+    End If
+    
+    totalDataRows = 0
+    totalOrigRows = 0
+    totalCells = 0
+    totalEstPages = 0
+    anyLandscape = False
+    anyPortrait = False
+    
+    Set firstTbl = configuredTables(1)
+    outTitlePreview = CStr(firstTbl("FullTitle"))
+    If tblCount > 1 Then
+        outTitlePreview = CStr(firstTbl("Title"))
+        If Len(CStr(firstTbl("Population"))) > 0 Then
+            If InStr(1, outTitlePreview, CStr(firstTbl("Population")), vbTextCompare) = 0 Then
+                outTitlePreview = outTitlePreview & " " & CStr(firstTbl("Population"))
+            End If
+        End If
+        outTitlePreview = outTitlePreview & "  (" & tblCount & " separate panels selected)"
+    End If
+    
+    For Each tItem In configuredTables
+        Set tObj = tItem
+        Dim rCnt As Long: rCnt = tObj("BodyRows").Count
+        Dim oCnt As Long: oCnt = rCnt
+        If tObj.Exists("OriginalRowCount") Then oCnt = CLng(tObj("OriginalRowCount"))
+        Dim cCnt As Long: cCnt = CLng(tObj("ColCount"))
+        Dim hCnt As Long: hCnt = CLng(tObj("NumHeaderRows"))
+        Dim wPts As Single: wPts = CSng(tObj("TotalWidthPts"))
+        Dim isLand As Boolean
+        isLand = (cCnt >= CSR_AUTO_LANDSCAPE_COL_THRESHOLD Or wPts > CSR_PORTRAIT_MAX_WIDTH_PTS)
+        If isLand Then anyLandscape = True Else anyPortrait = True
+        
+        totalDataRows = totalDataRows + rCnt
+        totalOrigRows = totalOrigRows + oCnt
+        totalCells = totalCells + ((rCnt + hCnt + 2) * cCnt)
+        totalEstPages = totalEstPages + EstimateCSROutputPages(rCnt, hCnt, isLand)
+    Next tItem
+    
+    Dim orientLabel As String
+    If anyLandscape And anyPortrait Then
+        orientLabel = "Mixed"
+    ElseIf anyLandscape Then
+        orientLabel = "Landscape"
+    Else
+        orientLabel = "Portrait"
+    End If
+    
+    Dim rowStr As String
+    If totalOrigRows > totalDataRows Then
+        rowStr = totalDataRows & " rows (from " & totalOrigRows & ")"
+    Else
+        rowStr = totalDataRows & " rows"
+    End If
+    
+    Dim estLow As Long, estHigh As Long
+    estLow = CLng(totalCells * 0.0025) + CLng(tblCount * 0.4)
+    If estLow < 1 Then estLow = 1
+    estHigh = CLng(estLow * 1.6) + 1
+    
+    CSR_FormatPreviewSummary = tblCount & " table(s)  |  " & rowStr & " x " & firstTbl("ColCount") & " cols  |  ~" & _
+                               totalEstPages & " page(s) (" & orientLabel & ")  |  Est. " & FormatEstimatedSeconds(estLow, estHigh)
 End Function
 
 
