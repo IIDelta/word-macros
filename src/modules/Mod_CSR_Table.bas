@@ -1199,6 +1199,99 @@ Public Sub FormatCSRTableStructure(ByVal tbl As Table, ByVal numHeaderRows As Lo
     
     ' 4. Regulatory citation styling: color Table/Listing/Figure mentions in footnotes as Blue (#0000FF)
     ColorCitationsInFootnotes tbl
+    
+    ' 5. Auto-position decimal tab stops near the horizontal center of each data column
+    CenterDataColumnDecimalTabs tbl, numHeaderRows
+End Sub
+
+Private Sub CenterDataColumnDecimalTabs(ByVal tbl As Table, ByVal numHeaderRows As Long)
+    Dim firstBodyRow As Long
+    Dim lastBodyRow As Long
+    Dim colCount As Long
+    Dim cIdx As Long
+    Dim rIdx As Long
+    Dim padPts As Single
+    Dim fallbackColW As Single
+    Dim secPageW As Single, secLeftM As Single, secRightM As Single
+    Dim colW As Single
+    Dim usableW As Single
+    Dim parenRows As Long
+    Dim sampledRows As Long
+    Dim cellTxt As String
+    Dim tabPosPts As Single
+    Dim cellRng As Range
+    
+    On Error Resume Next
+    firstBodyRow = 2 + numHeaderRows
+    lastBodyRow = tbl.Rows.Count - 1
+    If lastBodyRow < firstBodyRow Then
+        On Error GoTo 0
+        Exit Sub
+    End If
+    
+    colCount = tbl.Rows(firstBodyRow).Cells.Count
+    If colCount < 2 Then
+        On Error GoTo 0
+        Exit Sub
+    End If
+    
+    padPts = tbl.LeftPadding + tbl.RightPadding
+    If padPts < 0# Or padPts > 100# Then padPts = 11.52#
+    
+    secPageW = tbl.Range.Sections(1).PageSetup.PageWidth
+    secLeftM = tbl.Range.Sections(1).PageSetup.LeftMargin
+    secRightM = tbl.Range.Sections(1).PageSetup.RightMargin
+    If secPageW > 0# And secPageW < 3000# Then
+        fallbackColW = (secPageW - secLeftM - secRightM) / CSng(colCount)
+    Else
+        fallbackColW = 90#
+    End If
+    If fallbackColW <= 0# Then fallbackColW = 90#
+    
+    For cIdx = 2 To colCount
+        Err.Clear
+        colW = tbl.Rows(firstBodyRow).Cells(cIdx).Width
+        If Err.Number <> 0 Or colW <= 0# Or colW > 2000# Then
+            Err.Clear
+            colW = fallbackColW
+        End If
+        usableW = colW - padPts
+        
+        parenRows = 0
+        sampledRows = 0
+        For rIdx = firstBodyRow To lastBodyRow
+            If sampledRows >= 30 Then Exit For
+            If cIdx <= tbl.Rows(rIdx).Cells.Count Then
+                cellTxt = Trim(Replace(Replace(Replace(tbl.Rows(rIdx).Cells(cIdx).Range.Text, Chr(13), ""), Chr(7), ""), Chr(160), " "))
+                If Len(cellTxt) > 0 Then
+                    sampledRows = sampledRows + 1
+                    If InStr(cellTxt, "(") > 0 Then
+                        parenRows = parenRows + 1
+                    End If
+                End If
+            End If
+        Next rIdx
+        
+        If sampledRows > 0 And (parenRows * 2 >= sampledRows) Then
+            tabPosPts = CSng(Round((CDbl(usableW) / 2#) - 8#, 1))
+        Else
+            tabPosPts = CSng(Round(CDbl(usableW) / 2#, 1))
+        End If
+        
+        If tabPosPts < 21.6# Then tabPosPts = 21.6#
+        
+        For rIdx = firstBodyRow To lastBodyRow
+            If cIdx <= tbl.Rows(rIdx).Cells.Count Then
+                Set cellRng = tbl.Rows(rIdx).Cells(cIdx).Range
+                With cellRng.ParagraphFormat.TabStops
+                    .ClearAll
+                    .Add Position:=tabPosPts, Alignment:=3, Leader:=0 ' 3 = wdAlignTabDecimal, 0 = wdTabLeaderSpaces
+                End With
+            End If
+        Next rIdx
+    Next cIdx
+    Err.Clear
+    On Error GoTo 0
 End Sub
 
 Private Sub ReplacePatientInTable(ByVal tbl As Table)
@@ -2642,11 +2735,13 @@ Private Function PromptMultiTableSelection(ByVal allTables As Collection) As Col
     Dim ptDict As Object
     Dim totalCount As Long
     Dim userChoice As String
+    Dim combineDirective As String
+    Dim cleanedChoice As String
     
     Set res = New Collection
     totalCount = allTables.Count
     promptMsg = "Found " & totalCount & " distinct tables/subgroup panels:" & vbCrLf & _
-                "Enter number(s)/range (e.g. '1', '5-8', '1-2, 5-8'), keyword (e.g. 'Race'), or 'All':" & vbCrLf & vbCrLf
+                "Enter number(s)/range (e.g. '1', '5-8', '1-2, 5-8'), keyword (e.g. 'Race'), 'All', or 'Combine' (e.g. 'Combine', '1-17 combine'):" & vbCrLf & vbCrLf
     
     If totalCount <= 15 Then
         For pIdx = 1 To totalCount
@@ -2712,11 +2807,277 @@ Private Function PromptMultiTableSelection(ByVal allTables As Collection) As Col
         Exit Function
     End If
     
-    Set res = ParseMultiTableSelection(userChoice, allTables)
+    combineDirective = ExtractCombineDirective(userChoice, cleanedChoice)
+    If Len(cleanedChoice) = 0 And Len(combineDirective) > 0 Then
+        cleanedChoice = "All"
+    End If
+    
+    Set res = ParseMultiTableSelection(cleanedChoice, allTables)
     If res.Count = 0 Then
         MsgBox "Invalid table selection: '" & userChoice & "'.", vbExclamation, "Takeda CSR Tools"
+        Set PromptMultiTableSelection = res
+        Exit Function
     End If
+    
+    If res.Count >= 2 And CanCombineSubtables(res) Then
+        Dim doCombine As Boolean
+        doCombine = False
+        If combineDirective = "COMBINE" Then
+            doCombine = True
+        ElseIf combineDirective = "SEPARATE" Then
+            doCombine = False
+        Else
+            Dim combineMsg As String
+            combineMsg = "You selected " & res.Count & " subtables/panels." & vbCrLf & vbCrLf & _
+                         "How would you like to insert them?" & vbCrLf & vbCrLf & _
+                         ChrW(8226) & " Click YES to COMBINE all " & res.Count & " panels into ONE single CSR table" & vbCrLf & _
+                         "    (Each panel identifier becomes a parent row above its associated data rows)" & vbCrLf & vbCrLf & _
+                         ChrW(8226) & " Click NO to insert them as " & res.Count & " SEPARATE CSR tables"
+            Dim combResp As VbMsgBoxResult
+            combResp = MsgBox(combineMsg, vbYesNoCancel + vbQuestion + vbDefaultButton1, "Multiple Subtables Selected - Combine or Keep Separate?")
+            If combResp = vbCancel Then
+                Set PromptMultiTableSelection = New Collection
+                Exit Function
+            ElseIf combResp = vbYes Then
+                doCombine = True
+            Else
+                doCombine = False
+            End If
+        End If
+        
+        If doCombine Then
+            Dim combinedColl As Collection
+            Set combinedColl = New Collection
+            combinedColl.Add CombineSubtablesIntoSingleTable(res)
+            Set PromptMultiTableSelection = combinedColl
+            Exit Function
+        End If
+    End If
+    
     Set PromptMultiTableSelection = res
+End Function
+
+Private Function ExtractCombineDirective(ByVal rawInput As String, ByRef outCleaned As String) As String
+    Dim words() As String
+    Dim w As Variant
+    Dim wClean As String
+    Dim rebuilt As String
+    
+    ExtractCombineDirective = ""
+    rebuilt = ""
+    words = Split(Trim(rawInput), " ")
+    For Each w In words
+        wClean = LCase(Trim(CStr(w)))
+        ' Strip trailing/leading commas or semicolons when matching directive token
+        Do While Len(wClean) > 0 And (Left(wClean, 1) = "," Or Left(wClean, 1) = ";")
+            wClean = Mid(wClean, 2)
+        Loop
+        Do While Len(wClean) > 0 And (Right(wClean, 1) = "," Or Right(wClean, 1) = ";")
+            wClean = Left(wClean, Len(wClean) - 1)
+        Loop
+        
+        If wClean = "combine" Or wClean = "combined" Or wClean = "merge" Or wClean = "merged" Then
+            ExtractCombineDirective = "COMBINE"
+        ElseIf wClean = "separate" Or wClean = "split" Then
+            ExtractCombineDirective = "SEPARATE"
+        ElseIf Len(Trim(CStr(w))) > 0 Then
+            If Len(rebuilt) > 0 Then rebuilt = rebuilt & " "
+            rebuilt = rebuilt & Trim(CStr(w))
+        End If
+    Next w
+    
+    outCleaned = Trim(rebuilt)
+    Do While Len(outCleaned) > 0 And (Left(outCleaned, 1) = "," Or Left(outCleaned, 1) = ";")
+        outCleaned = Trim(Mid(outCleaned, 2))
+    Loop
+    Do While Len(outCleaned) > 0 And (Right(outCleaned, 1) = "," Or Right(outCleaned, 1) = ";")
+        outCleaned = Trim(Left(outCleaned, Len(outCleaned) - 1))
+    Loop
+End Function
+
+Private Function CanCombineSubtables(ByVal selectedTables As Collection) As Boolean
+    Dim firstCols As Long
+    Dim i As Long
+    Dim tDict As Object
+    
+    CanCombineSubtables = False
+    If selectedTables Is Nothing Then Exit Function
+    If selectedTables.Count < 2 Then Exit Function
+    
+    Set tDict = selectedTables(1)
+    firstCols = CLng(tDict("ColCount"))
+    For i = 2 To selectedTables.Count
+        Set tDict = selectedTables(i)
+        If CLng(tDict("ColCount")) <> firstCols Then Exit Function
+    Next i
+    CanCombineSubtables = True
+End Function
+
+Private Function ExtractCommonSubtitlePrefix(ByVal selectedTables As Collection) As String
+    Dim i As Long
+    Dim tDict As Object
+    Dim subText As String
+    Dim colPos As Long
+    Dim pref As String
+    Dim commonPref As String
+    
+    ExtractCommonSubtitlePrefix = ""
+    commonPref = ""
+    For i = 1 To selectedTables.Count
+        Set tDict = selectedTables(i)
+        subText = Trim(CStr(tDict("Subtitle")))
+        colPos = InStr(subText, ":")
+        If colPos <= 1 Then Exit Function
+        pref = Trim(Left(subText, colPos - 1))
+        If i = 1 Then
+            commonPref = pref
+        ElseIf StrComp(commonPref, pref, vbTextCompare) <> 0 Then
+            Exit Function
+        End If
+    Next i
+    ExtractCommonSubtitlePrefix = commonPref
+End Function
+
+Private Function ExtractPanelParentLabel(ByVal subTbl As Object, ByVal commonPrefix As String, ByVal panelIdx As Long) As String
+    Dim subText As String
+    Dim colPos As Long
+    Dim rawLabel As String
+    
+    subText = Trim(CStr(subTbl("Subtitle")))
+    If Len(subText) > 0 Then
+        If Len(commonPrefix) > 0 Then
+            colPos = InStr(subText, ":")
+            If colPos > 0 Then
+                rawLabel = Trim(Mid(subText, colPos + 1))
+            Else
+                rawLabel = subText
+            End If
+        Else
+            rawLabel = subText
+        End If
+    Else
+        rawLabel = "Panel " & CStr(panelIdx)
+    End If
+    
+    If Len(rawLabel) = 0 Then rawLabel = "Panel " & CStr(panelIdx)
+    ExtractPanelParentLabel = FormatRowStubSentenceCase(rawLabel)
+End Function
+
+Private Function CombineSubtablesIntoSingleTable(ByVal selectedTables As Collection) As Object
+    Dim firstTbl As Object
+    Dim combined As Object
+    Dim colCount As Long
+    Dim commonPrefix As String
+    Dim combinedRows As Collection
+    Dim combinedFootnotes As Collection
+    Dim totalOrigRows As Long
+    Dim i As Long, c As Long
+    Dim subTbl As Object
+    Dim subRows As Collection
+    Dim minIndent As Single
+    Dim indentShift As Single
+    Dim rItem As Variant
+    Dim origData As Variant, origInds As Variant
+    Dim parentLabel As String
+    Dim fn As Variant
+    Dim baseT As String, popT As String, fullT As String
+    
+    Set firstTbl = selectedTables(1)
+    colCount = CLng(firstTbl("ColCount"))
+    commonPrefix = ExtractCommonSubtitlePrefix(selectedTables)
+    
+    Set combined = CreateObject("Scripting.Dictionary")
+    combined("TableIndex") = 1
+    combined("SourceNumber") = CStr(firstTbl("SourceNumber"))
+    baseT = Trim(CStr(firstTbl("Title")))
+    popT = Trim(CStr(firstTbl("Population")))
+    combined("Title") = baseT
+    combined("Subtitle") = ""
+    combined("Population") = popT
+    
+    fullT = baseT
+    If Len(popT) > 0 Then
+        If Right(fullT, Len(popT)) <> popT Then
+            fullT = fullT & " " & popT
+        End If
+    End If
+    combined("FullTitle") = fullT
+    combined("ColCount") = colCount
+    combined("NumHeaderRows") = CLng(firstTbl("NumHeaderRows"))
+    combined("HeaderValues") = firstTbl("HeaderValues")
+    combined("TotalWidthPts") = CSng(firstTbl("TotalWidthPts"))
+    
+    Set combinedRows = New Collection
+    Set combinedFootnotes = New Collection
+    totalOrigRows = 0
+    
+    For i = 1 To selectedTables.Count
+        Set subTbl = selectedTables(i)
+        parentLabel = ExtractPanelParentLabel(subTbl, commonPrefix, i)
+        
+        Dim parentData() As String
+        Dim parentInds() As Single
+        ReDim parentData(1 To colCount)
+        ReDim parentInds(1 To colCount)
+        parentData(1) = parentLabel
+        parentInds(1) = 0#
+        For c = 2 To colCount
+            parentData(c) = ""
+            parentInds(c) = 0#
+        Next c
+        combinedRows.Add Array(parentData, parentInds)
+        
+        Set subRows = subTbl("BodyRows")
+        minIndent = 999#
+        For Each rItem In subRows
+            origInds = rItem(1)
+            If CSng(origInds(1)) < minIndent Then
+                minIndent = CSng(origInds(1))
+            End If
+        Next rItem
+        If minIndent <= 0.5 Then
+            indentShift = CSR_INDENT_LEVEL_1_PTS
+        Else
+            indentShift = 0#
+        End If
+        
+        For Each rItem In subRows
+            origData = rItem(0)
+            origInds = rItem(1)
+            
+            Dim rowDataCopy() As String
+            Dim rowIndsCopy() As Single
+            ReDim rowDataCopy(1 To colCount)
+            ReDim rowIndsCopy(1 To colCount)
+            For c = 1 To colCount
+                rowDataCopy(c) = CStr(origData(c))
+                rowIndsCopy(c) = CSng(origInds(c))
+            Next c
+            
+            Dim newInd As Single
+            newInd = rowIndsCopy(1) + indentShift
+            If newInd > CSR_INDENT_LEVEL_4_PTS Then newInd = CSR_INDENT_LEVEL_4_PTS
+            rowIndsCopy(1) = newInd
+            
+            combinedRows.Add Array(rowDataCopy, rowIndsCopy)
+        Next rItem
+        
+        totalOrigRows = totalOrigRows + subRows.Count + 1
+        
+        If subTbl.Exists("Footnotes") Then
+            For Each fn In subTbl("Footnotes")
+                If Not CollectionContains(combinedFootnotes, CStr(fn)) Then
+                    combinedFootnotes.Add CStr(fn)
+                End If
+            Next fn
+        End If
+    Next i
+    
+    Set combined("BodyRows") = combinedRows
+    Set combined("Footnotes") = combinedFootnotes
+    combined("OriginalRowCount") = totalOrigRows
+    
+    Set CombineSubtablesIntoSingleTable = combined
 End Function
 
 Private Function SanitizeInputBoxText(ByVal s As String) As String
@@ -3241,19 +3602,90 @@ Private Sub ApplyHierarchyRowFilterToTable( _
                     filteredRows.Add rItem
                 End If
             Else
-                ' Parent SOC heading with child Preferred Terms: keep parent if >= 1 child survives
+                ' Parent heading with indented child rows (supports both 2-level SOC->PT and 3-level Combined Panel->Overall->PT)
                 Dim keptChildren As Collection
                 Set keptChildren = New Collection
                 Dim cIdxVar As Variant
+                Dim cItem As Variant
+                Dim cData As Variant
+                Dim cInds As Variant
+                Dim hasGrandChildren As Boolean
+                hasGrandChildren = False
                 For Each cIdxVar In childrenIndices
-                    Dim cItem As Variant
-                    Dim cData As Variant
                     cItem = srcRows(CLng(cIdxVar))
-                    cData = cItem(0)
-                    If RowMeetsThreshold(cData, colCount, filterMode, minCount, minPct, colScope, isTotalCol, hasAnyTotalCol) Then
-                        keptChildren.Add cItem
+                    cInds = cItem(1)
+                    If CSng(cInds(1)) > (CSR_INDENT_LEVEL_1_PTS + 0.5) Then
+                        hasGrandChildren = True
+                        Exit For
                     End If
                 Next cIdxVar
+                
+                If Not hasGrandChildren Then
+                    For Each cIdxVar In childrenIndices
+                        cItem = srcRows(CLng(cIdxVar))
+                        cData = cItem(0)
+                        If RowMeetsThreshold(cData, colCount, filterMode, minCount, minPct, colScope, isTotalCol, hasAnyTotalCol) Then
+                            keptChildren.Add cItem
+                        End If
+                    Next cIdxVar
+                Else
+                    Dim chPos As Long
+                    Dim chCount As Long
+                    chCount = childrenIndices.Count
+                    chPos = 1
+                    Do While chPos <= chCount
+                        Dim subItem As Variant
+                        Dim subData As Variant
+                        Dim subInds As Variant
+                        Dim subIndent As Single
+                        subItem = srcRows(CLng(childrenIndices(chPos)))
+                        subData = subItem(0)
+                        subInds = subItem(1)
+                        subIndent = CSng(subInds(1))
+                        
+                        If subIndent <= (CSR_INDENT_LEVEL_1_PTS + 0.5) Then
+                            Dim nextPos As Long
+                            Dim keptGrands As Collection
+                            Dim grandCount As Long
+                            Set keptGrands = New Collection
+                            grandCount = 0
+                            nextPos = chPos + 1
+                            Do While nextPos <= chCount
+                                Dim gItem As Variant
+                                Dim gInds As Variant
+                                gItem = srcRows(CLng(childrenIndices(nextPos)))
+                                gInds = gItem(1)
+                                If CSng(gInds(1)) > (subIndent + 0.5) Then
+                                    grandCount = grandCount + 1
+                                    If RowMeetsThreshold(gItem(0), colCount, filterMode, minCount, minPct, colScope, isTotalCol, hasAnyTotalCol) Then
+                                        keptGrands.Add gItem
+                                    End If
+                                    nextPos = nextPos + 1
+                                Else
+                                    Exit Do
+                                End If
+                            Loop
+                            
+                            If grandCount = 0 Then
+                                If RowMeetsThreshold(subData, colCount, filterMode, minCount, minPct, colScope, isTotalCol, hasAnyTotalCol) Then
+                                    keptChildren.Add subItem
+                                End If
+                            ElseIf keptGrands.Count > 0 Then
+                                keptChildren.Add subItem
+                                Dim kgItem As Variant
+                                For Each kgItem In keptGrands
+                                    keptChildren.Add kgItem
+                                Next kgItem
+                            End If
+                            chPos = nextPos
+                        Else
+                            If RowMeetsThreshold(subData, colCount, filterMode, minCount, minPct, colScope, isTotalCol, hasAnyTotalCol) Then
+                                keptChildren.Add subItem
+                            End If
+                            chPos = chPos + 1
+                        End If
+                    Loop
+                End If
                 
                 If keptChildren.Count > 0 Then
                     filteredRows.Add rItem
